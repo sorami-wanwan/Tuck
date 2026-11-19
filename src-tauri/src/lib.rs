@@ -12,6 +12,7 @@ mod models;
 mod package;
 mod plain_export;
 mod state;
+mod thumbnail_regen;
 mod ytdlp;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -361,6 +362,9 @@ pub fn run() {
             commands::import_url,
             commands::cancel_url_import,
             commands::save_media_thumbnail,
+            commands::regenerate_item_thumbnail,
+            commands::list_thumbnail_targets,
+            commands::get_thumbnail_stats,
             commands::query_entries,
             commands::get_item_detail,
             commands::get_thumbnail,

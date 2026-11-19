@@ -905,3 +905,169 @@ fn test_interface_priority_prefers_wifi_across_oses() {
     assert_eq!(linux_wifi.1, 0);
     assert_eq!(win_wifi.1, 0);
 }
+
+#[tokio::test]
+async fn test_lan_server_thumbnail_regeneration_rbac_and_scope_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("lan_thumb_regen.vault");
+    let mut db = VaultDb::create(&vault_path, "vault-pass-regen", true).unwrap();
+
+    let png1 = minimal_png_bytes();
+    let item_id = match db.import_bytes(&png1, Some("sample_img")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected imported image"),
+    };
+
+    let state = AppState::default();
+    {
+        let mut g = state.lock_db().unwrap();
+        *g = Some(db);
+    }
+
+    let (handle, status) = start_lan_server_on_addr(
+        state.clone(),
+        StartLanShareRequest {
+            mode: LanAccessMode::ReadOnly,
+            duration_minutes: 30,
+            bind_ip: None,
+            pause_idle_lock: true,
+        },
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "127.0.0.1".to_string(),
+        vec![],
+        AssetSource::None,
+        LanHostNotifier::default(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut g = state.lan_server.lock().unwrap();
+        *g = Some(handle.clone());
+    }
+    let port = status.port;
+
+    let pin_body = format!(r#"{{"pin":"{}"}}"#, status.pin);
+    let pin_res = send_raw_http(
+        port,
+        "POST",
+        "/api/auth/pin",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        pin_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(pin_res.status, 200);
+    let cookie = pin_res
+        .headers
+        .get("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let entries_body = format!(
+        r#"{{"scope":"entries","entries":[{{"kind":"image","id":"{item_id}"}}]}}"#
+    );
+
+    // 1. ReadOnly mode rejects both endpoints with 403
+    let ro_regen = send_raw_http(
+        port,
+        "POST",
+        &format!("/api/items/{item_id}/thumbnail/regenerate"),
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+            ("Cookie", &cookie),
+        ],
+        br#"{"timestampMs":null}"#,
+    )
+    .await;
+    assert_eq!(ro_regen.status, 403);
+
+    let ro_targets = send_raw_http(
+        port,
+        "POST",
+        "/api/thumbnails/targets",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+            ("Cookie", &cookie),
+        ],
+        entries_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(ro_targets.status, 403);
+
+    // 2. Switch to ReadWrite
+    handle.set_mode(LanAccessMode::ReadWrite);
+
+    // Missing CSRF header -> 403
+    let no_csrf = send_raw_http(
+        port,
+        "POST",
+        &format!("/api/items/{item_id}/thumbnail/regenerate"),
+        &[("Content-Type", "application/json"), ("Cookie", &cookie)],
+        br#"{}"#,
+    )
+    .await;
+    assert_eq!(no_csrf.status, 403);
+
+    // Valid regenerate request -> 200 updated
+    let ok_regen = send_raw_http(
+        port,
+        "POST",
+        &format!("/api/items/{item_id}/thumbnail/regenerate"),
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+            ("Cookie", &cookie),
+        ],
+        br#"{"timestampMs":null}"#,
+    )
+    .await;
+    assert_eq!(ok_regen.status, 200);
+    let regen_json: serde_json::Value = serde_json::from_slice(&ok_regen.body).unwrap();
+    assert_eq!(regen_json["status"], "updated");
+    assert_eq!(regen_json["itemId"], item_id);
+
+    // Valid targets request with scope="entries" -> 200
+    let ok_targets = send_raw_http(
+        port,
+        "POST",
+        "/api/thumbnails/targets",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+            ("Cookie", &cookie),
+        ],
+        entries_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(ok_targets.status, 200);
+    let targets_json: serde_json::Value = serde_json::from_slice(&ok_targets.body).unwrap();
+    assert_eq!(targets_json.as_array().unwrap().len(), 1);
+    assert_eq!(targets_json[0]["itemId"], item_id);
+
+    // Vault-wide scopes must be rejected with 400 on LAN API
+    for forbidden_scope in ["all", "missingOnly", "videosOnly"] {
+        let body = format!(r#"{{"scope":"{forbidden_scope}","entries":[]}}"#);
+        let bad_scope = send_raw_http(
+            port,
+            "POST",
+            "/api/thumbnails/targets",
+            &[
+                ("Content-Type", "application/json"),
+                ("X-Tuck-Client", "web"),
+                ("Cookie", &cookie),
+            ],
+            body.as_bytes(),
+        )
+        .await;
+        assert_eq!(bad_scope.status, 400);
+    }
+
+    handle.stop("test_done");
+}

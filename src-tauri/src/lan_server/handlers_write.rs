@@ -13,8 +13,9 @@ use crate::commands::percent_decode;
 use crate::db::ImportOutcome;
 use crate::error::VaultError;
 use crate::imaging::is_video_mime;
-use crate::models::{EntryKind, EntryRef, ImportReport};
+use crate::models::{EntryKind, EntryRef, ImportReport, ThumbnailRegenScope};
 use crate::state::AppState;
+use crate::thumbnail_regen::regenerate_item_thumbnail_on_host;
 use crate::ytdlp;
 
 use super::auth::{error_response, notify_changed, require_write_checked, run_db};
@@ -156,7 +157,77 @@ pub(super) async fn handle_save_item_thumbnail(
         db.save_media_thumbnail(&id, &raw_png, width, height, duration_ms)
     })
     .await?;
+    let item_ids = vec![res.id.clone()];
+    let _ = runtime
+        .events_tx
+        .send(LanSseEvent::ThumbnailsUpdated {
+            item_ids: item_ids.clone(),
+        });
+    runtime.notifier.emit_thumbnails_updated(&item_ids);
     notify_changed(&runtime);
+    Ok(Json(res).into_response())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RegenerateThumbnailBody {
+    #[serde(default)]
+    timestamp_ms: Option<i64>,
+}
+
+pub(super) async fn handle_regenerate_item_thumbnail(
+    State(runtime): State<Arc<LanServerRuntime>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<RegenerateThumbnailBody>>,
+) -> Result<Response, LanApiError> {
+    require_write_checked(&runtime, &headers)?;
+    let timestamp_ms = body.and_then(|Json(b)| b.timestamp_ms);
+    let res = regenerate_item_thumbnail_on_host(
+        runtime.app_state.clone(),
+        id.clone(),
+        timestamp_ms,
+    )
+    .await
+    .map_err(error_response)?;
+    if res.status == "updated" {
+        let item_ids = vec![id];
+        let _ = runtime
+            .events_tx
+            .send(LanSseEvent::ThumbnailsUpdated {
+                item_ids: item_ids.clone(),
+            });
+        runtime.notifier.emit_thumbnails_updated(&item_ids);
+        notify_changed(&runtime);
+    }
+    Ok(Json(res).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThumbnailTargetsBody {
+    scope: ThumbnailRegenScope,
+    #[serde(default)]
+    entries: Vec<EntryRef>,
+}
+
+pub(super) async fn handle_list_thumbnail_targets(
+    State(runtime): State<Arc<LanServerRuntime>>,
+    headers: HeaderMap,
+    Json(body): Json<ThumbnailTargetsBody>,
+) -> Result<Response, LanApiError> {
+    require_write_checked(&runtime, &headers)?;
+    if body.scope != ThumbnailRegenScope::Entries {
+        return Err(error_response(VaultError::InvalidInput(
+            "LAN クライアントでは選択項目のみ対象にできます".to_string(),
+        ))
+        .into());
+    }
+    let entries = body.entries;
+    let res = run_db(&runtime, move |db| {
+        db.list_thumbnail_target_items(ThumbnailRegenScope::Entries, &entries)
+    })
+    .await?;
     Ok(Json(res).into_response())
 }
 

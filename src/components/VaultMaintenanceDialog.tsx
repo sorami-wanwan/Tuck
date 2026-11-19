@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
+  AlertCircle,
   Archive,
   CheckCircle2,
   Download,
@@ -15,6 +16,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { imageMemoryCache } from "../services/imageCache";
 import { formatErrorMessage, vaultApi } from "../services/vaultApi";
 import { formatBytes } from "../utils/format";
 import type {
@@ -25,6 +27,8 @@ import type {
   PackageExportReport,
   PackageImportReport,
   TagWithCount,
+  ThumbnailRegenScope,
+  ThumbnailStats,
   VaultHealthInfo,
 } from "../types/vault";
 
@@ -72,6 +76,23 @@ export function VaultMaintenanceDialog({
   const [backingUp, setBackingUp] = useState(false);
   const [backupReport, setBackupReport] = useState<BackupReport | null>(null);
   const [maintError, setMaintError] = useState<string | null>(null);
+  const [thumbStats, setThumbStats] = useState<ThumbnailStats | null>(null);
+  const [thumbScope, setThumbScope] = useState<Exclude<ThumbnailRegenScope, "entries">>("missingOnly");
+  const [thumbRegening, setThumbRegening] = useState(false);
+  const [thumbProgress, setThumbProgress] = useState<{
+    done: number;
+    total: number;
+    succeeded: number;
+    failed: number;
+  } | null>(null);
+  const [thumbReport, setThumbReport] = useState<{
+    total: number;
+    succeeded: number;
+    failed: number;
+    cancelled: boolean;
+  } | null>(null);
+  const thumbCancelRef = useRef(false);
+  const thumbScopeTouchedRef = useRef(false);
 
   // Tab 2: Export Partial Package
   const [includePreselectedEntries, setIncludePreselectedEntries] = useState(true);
@@ -109,6 +130,16 @@ export function VaultMaintenanceDialog({
     }
   };
 
+  const loadThumbStats = async (): Promise<ThumbnailStats | null> => {
+    try {
+      const st = await vaultApi.getThumbnailStats();
+      setThumbStats(st);
+      return st;
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
     const dlg = dialogRef.current;
     if (!dlg) return;
@@ -117,6 +148,11 @@ export function VaultMaintenanceDialog({
       setOptimizeReport(null);
       setBackupReport(null);
       setMaintError(null);
+      setThumbRegening(false);
+      setThumbProgress(null);
+      setThumbReport(null);
+      thumbCancelRef.current = false;
+      thumbScopeTouchedRef.current = false;
       setExportError(null);
       setExportReport(null);
       setExportPass("");
@@ -134,7 +170,15 @@ export function VaultMaintenanceDialog({
 
       if (!dlg.open) dlg.showModal();
       void loadHealth();
+      void loadThumbStats().then((st) => {
+        if (st && !thumbScopeTouchedRef.current) {
+          setThumbScope(
+            st.missingCount > 0 ? "missingOnly" : st.videoCount > 0 ? "videosOnly" : "all"
+          );
+        }
+      });
     } else if (dlg.open) {
+      thumbCancelRef.current = true;
       dlg.close();
     }
   }, [open, initialTab, preselectedFolderIds, preselectedEntries]);
@@ -195,6 +239,57 @@ export function VaultMaintenanceDialog({
       setMaintError(formatErrorMessage(err));
     } finally {
       setBackingUp(false);
+    }
+  };
+
+  const handleRegenThumbnails = async () => {
+    if (thumbRegening) return;
+    setMaintError(null);
+    setThumbReport(null);
+    thumbCancelRef.current = false;
+    setThumbRegening(true);
+    try {
+      const targets = await vaultApi.listThumbnailTargets(thumbScope, []);
+      if (targets.length === 0) {
+        setThumbReport({ total: 0, succeeded: 0, failed: 0, cancelled: false });
+        onToast("info", "再生成対象のアイテムはありません");
+        return;
+      }
+
+      let done = 0;
+      let succeeded = 0;
+      let failed = 0;
+      setThumbProgress({ done: 0, total: targets.length, succeeded: 0, failed: 0 });
+
+      for (const target of targets) {
+        if (thumbCancelRef.current) break;
+        try {
+          await imageMemoryCache.regenerateItemThumbnail(target.itemId, target.mimeType);
+          succeeded += 1;
+        } catch {
+          failed += 1;
+        }
+        done += 1;
+        setThumbProgress({ done, total: targets.length, succeeded, failed });
+      }
+
+      const cancelled = thumbCancelRef.current;
+      setThumbReport({ total: targets.length, succeeded, failed, cancelled });
+      await onDataChanged();
+      await Promise.all([loadHealth(), loadThumbStats()]);
+
+      if (cancelled) {
+        onToast("info", `サムネイル再生成を中断しました（${succeeded}件完了）`);
+      } else if (failed === 0) {
+        onToast("success", `${succeeded}件のサムネイルを再生成しました`);
+      } else {
+        onToast("warning", `${succeeded}件を再生成しました（${failed}件失敗）`);
+      }
+    } catch (err) {
+      setMaintError(formatErrorMessage(err));
+    } finally {
+      setThumbRegening(false);
+      setThumbProgress(null);
     }
   };
 
@@ -323,6 +418,7 @@ export function VaultMaintenanceDialog({
       aria-labelledby="maintenance-dialog-title"
       onClose={(e) => {
         e.currentTarget.returnValue = "";
+        thumbCancelRef.current = true;
         onClose();
       }}
     >
@@ -432,6 +528,122 @@ export function VaultMaintenanceDialog({
                 </div>
               ) : (
                 <p>{healthLoading ? "診断中..." : "状態を取得できませんでした"}</p>
+              )}
+            </section>
+
+            <section className="maintenance-card">
+              <h3>サムネイルの再生成</h3>
+              <p>
+                動画や画像のサムネイルを作り直します。砂嵐・真っ暗になった動画も、有効なフレームを探索して更新します。
+              </p>
+
+              {thumbStats && (
+                <div className={`url-status-badge ${thumbStats.ffmpegAvailable ? "ok" : ""}`}>
+                  {thumbStats.ffmpegAvailable ? (
+                    <CheckCircle2 size={13} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <AlertCircle size={13} style={{ flexShrink: 0 }} />
+                  )}
+                  <span>
+                    {thumbStats.ffmpegAvailable
+                      ? "ffmpeg 検出済み（動画フレームを高速・高精度に抽出します）"
+                      : "ffmpeg 未検出（ブラウザ抽出を使用します。設定画面で ffmpeg を指定するとより安定します）"}
+                  </span>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <button
+                  type="button"
+                  className={`pill-btn ${thumbScope === "missingOnly" ? "active" : ""}`}
+                  disabled={thumbRegening}
+                  onClick={() => {
+                    thumbScopeTouchedRef.current = true;
+                    setThumbScope("missingOnly");
+                  }}
+                >
+                  欠落のみ生成 ({thumbStats?.missingCount ?? 0})
+                </button>
+                <button
+                  type="button"
+                  className={`pill-btn ${thumbScope === "videosOnly" ? "active" : ""}`}
+                  disabled={thumbRegening}
+                  onClick={() => {
+                    thumbScopeTouchedRef.current = true;
+                    setThumbScope("videosOnly");
+                  }}
+                >
+                  動画のみ再生成 ({thumbStats?.videoCount ?? 0})
+                </button>
+                <button
+                  type="button"
+                  className={`pill-btn ${thumbScope === "all" ? "active" : ""}`}
+                  disabled={thumbRegening}
+                  onClick={() => {
+                    thumbScopeTouchedRef.current = true;
+                    setThumbScope("all");
+                  }}
+                >
+                  すべて再生成 ({thumbStats?.totalItems ?? 0})
+                </button>
+              </div>
+
+              {thumbRegening && thumbProgress && (
+                <div className="url-progress-box">
+                  <div className="url-progress-head">
+                    <span className="tabular-nums">
+                      処理中: {thumbProgress.done} / {thumbProgress.total} 件
+                    </span>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "3px 8px", fontSize: 11 }}
+                      onClick={() => {
+                        thumbCancelRef.current = true;
+                      }}
+                    >
+                      キャンセル
+                    </button>
+                  </div>
+                  <div className="url-progress-track">
+                    <div
+                      className="url-progress-fill"
+                      style={{
+                        inlineSize: `${Math.round(
+                          (thumbProgress.done / Math.max(1, thumbProgress.total)) * 100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="url-progress-meta tabular-nums">
+                    <span>成功 {thumbProgress.succeeded} 件</span>
+                    <span>失敗 {thumbProgress.failed} 件</span>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={thumbRegening || optimizing || backingUp}
+                  onClick={() => void handleRegenThumbnails()}
+                >
+                  <RefreshCw size={14} className={thumbRegening ? "spin" : ""} />
+                  {thumbRegening ? "再生成中..." : "サムネイルを再生成"}
+                </button>
+              </div>
+
+              {thumbReport && (
+                <div className="success-banner">
+                  {thumbReport.total === 0
+                    ? "対象となるアイテムはありませんでした。"
+                    : thumbReport.cancelled
+                      ? `再生成を中断しました：成功 ${thumbReport.succeeded}件 / 失敗 ${thumbReport.failed}件（計 ${thumbReport.total}件中）`
+                      : `再生成完了：成功 ${thumbReport.succeeded}件${
+                          thumbReport.failed > 0 ? ` / 失敗 ${thumbReport.failed}件` : ""
+                        }`}
+                </div>
               )}
             </section>
 

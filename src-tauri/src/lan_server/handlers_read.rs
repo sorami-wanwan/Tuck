@@ -65,6 +65,10 @@ pub(super) async fn handle_sse_events(
                             "url_import_progress",
                             serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string()),
                         ),
+                        LanSseEvent::ThumbnailsUpdated { item_ids } => (
+                            "thumbnails_updated",
+                            serde_json::json!({ "itemIds": item_ids }).to_string(),
+                        ),
                     };
                     let item = Ok(SseEvent::default().event(name).data(data));
                     return Some((item, (rx, is_terminal)));

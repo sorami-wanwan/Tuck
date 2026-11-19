@@ -6,6 +6,277 @@ const THUMB_CACHE_LIMIT = 500;
 const FULL_CACHE_LIMIT = 12;
 const THUMB_MAX_EDGE = 400;
 
+type FrameQualityKind = "good" | "flat" | "noise" | "blank";
+
+interface FrameQuality {
+  kind: FrameQualityKind;
+  score: number;
+}
+
+interface CapturedFrame {
+  pngBytes: ArrayBuffer;
+  width: number;
+  height: number;
+  durationMs: number;
+}
+
+function calcStd(sum: number, sum2: number, n: number): number {
+  if (n <= 0) return 0;
+  const mean = sum / n;
+  return Math.sqrt(Math.max(0, sum2 / n - mean * mean));
+}
+
+function calcPearson(
+  n: number,
+  sx: number,
+  sy: number,
+  sx2: number,
+  sy2: number,
+  sxy: number
+): number {
+  if (n <= 0) return 1.0;
+  const mx = sx / n;
+  const my = sy / n;
+  const vx = Math.max(0, sx2 / n - mx * mx);
+  const vy = Math.max(0, sy2 / n - my * my);
+  const denom = Math.sqrt(vx * vy);
+  if (denom <= 1e-6) return 1.0;
+  return (sxy / n - mx * my) / denom;
+}
+
+function analyzeCanvasFrame(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): FrameQuality {
+  if (width <= 0 || height <= 0) {
+    return { kind: "blank", score: -1 };
+  }
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const step = Math.max(1, Math.floor(Math.max(width, height) / 160));
+
+  let totalSamples = 0;
+  let opaqueCount = 0;
+  let darkCount = 0;
+  let brightCount = 0;
+
+  let sumR = 0;
+  let sumR2 = 0;
+  let sumG = 0;
+  let sumG2 = 0;
+  let sumB = 0;
+  let sumB2 = 0;
+  let sumY = 0;
+  let sumY2 = 0;
+
+  let nh = 0;
+  let sumHDiff = 0;
+  let sxh = 0;
+  let syh = 0;
+  let sxh2 = 0;
+  let syh2 = 0;
+  let sxyh = 0;
+
+  let nv = 0;
+  let sumVDiff = 0;
+  let sxv = 0;
+  let syv = 0;
+  let sxv2 = 0;
+  let syv2 = 0;
+  let sxyv = 0;
+
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      totalSamples += 1;
+      const off = (y * width + x) * 4;
+      const a = data[off + 3];
+      if (a < 16) continue;
+      opaqueCount += 1;
+
+      const r = data[off];
+      const g = data[off + 1];
+      const b = data[off + 2];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+      sumR += r;
+      sumR2 += r * r;
+      sumG += g;
+      sumG2 += g * g;
+      sumB += b;
+      sumB2 += b * b;
+      sumY += lum;
+      sumY2 += lum * lum;
+
+      if (lum < 14) darkCount += 1;
+      if (lum > 242) brightCount += 1;
+
+      if (x + 1 < width) {
+        const offH = (y * width + (x + 1)) * 4;
+        if (data[offH + 3] >= 16) {
+          const r2 = data[offH];
+          const g2 = data[offH + 1];
+          const b2 = data[offH + 2];
+          const lum2 = 0.299 * r2 + 0.587 * g2 + 0.114 * b2;
+          sumHDiff += (Math.abs(r - r2) + Math.abs(g - g2) + Math.abs(b - b2)) / 3;
+          sxh += lum;
+          syh += lum2;
+          sxh2 += lum * lum;
+          syh2 += lum2 * lum2;
+          sxyh += lum * lum2;
+          nh += 1;
+        }
+      }
+
+      if (y + 1 < height) {
+        const offV = ((y + 1) * width + x) * 4;
+        if (data[offV + 3] >= 16) {
+          const r2 = data[offV];
+          const g2 = data[offV + 1];
+          const b2 = data[offV + 2];
+          const lum2 = 0.299 * r2 + 0.587 * g2 + 0.114 * b2;
+          sumVDiff += (Math.abs(r - r2) + Math.abs(g - g2) + Math.abs(b - b2)) / 3;
+          sxv += lum;
+          syv += lum2;
+          sxv2 += lum * lum;
+          syv2 += lum2 * lum2;
+          sxyv += lum * lum2;
+          nv += 1;
+        }
+      }
+    }
+  }
+
+  if (totalSamples === 0 || opaqueCount === 0 || opaqueCount / totalSamples < 0.05) {
+    return { kind: "blank", score: -1 };
+  }
+
+  const stdY = calcStd(sumY, sumY2, opaqueCount);
+  const colorSpread =
+    calcStd(sumR, sumR2, opaqueCount) +
+    calcStd(sumG, sumG2, opaqueCount) +
+    calcStd(sumB, sumB2, opaqueCount);
+  const darkRatio = darkCount / opaqueCount;
+  const brightRatio = brightCount / opaqueCount;
+
+  const corrH = calcPearson(nh, sxh, syh, sxh2, syh2, sxyh);
+  const corrV = calcPearson(nv, sxv, syv, sxv2, syv2, sxyv);
+  const meanHDiff = nh > 0 ? sumHDiff / nh : 0;
+  const meanVDiff = nv > 0 ? sumVDiff / nv : 0;
+
+  if (
+    (stdY < 7 && colorSpread < 18) ||
+    (darkRatio > 0.96 && stdY < 16) ||
+    (brightRatio > 0.96 && stdY < 16)
+  ) {
+    return { kind: "flat", score: stdY * 0.5 + colorSpread * 0.1 };
+  }
+
+  if (
+    stdY >= 10 &&
+    corrH < 0.35 &&
+    corrV < 0.35 &&
+    meanHDiff / stdY > 0.78 &&
+    meanVDiff / stdY > 0.78
+  ) {
+    return {
+      kind: "noise",
+      score: 5 + (Math.max(0, corrH) + Math.max(0, corrV)) * 10,
+    };
+  }
+
+  return {
+    kind: "good",
+    score: 100 + Math.min(80, stdY) + Math.min(40, colorSpread * 0.2) - darkRatio * 30,
+  };
+}
+
+function buildCandidateTimestampsSec(durationSec: number): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return [0];
+  }
+  const maxTs = Math.max(0, durationSec - 0.1);
+  let raw: number[];
+  let minGap: number;
+  if (durationSec >= 5) {
+    raw = [
+      Math.min(durationSec * 0.12, 15),
+      durationSec * 0.25,
+      durationSec * 0.5,
+      1.0,
+      0.0,
+    ];
+    minGap = 0.4;
+  } else if (durationSec >= 0.5) {
+    raw = [durationSec * 0.25, durationSec * 0.5, 0.0];
+    minGap = 0.2;
+  } else {
+    return [0];
+  }
+
+  const out: number[] = [];
+  for (const t of raw) {
+    const clamped = Math.min(maxTs, Math.max(0, t));
+    if (!out.some((prev) => Math.abs(prev - clamped) < minGap)) {
+      out.push(clamped);
+    }
+  }
+  return out.length > 0 ? out : [0];
+}
+
+function waitForFrameSettle(video: HTMLVideoElement): Promise<void> {
+  const rvfc = (
+    video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+    }
+  ).requestVideoFrameCallback;
+
+  const afterRaf = () =>
+    new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+
+  if (typeof rvfc === "function") {
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const timer = window.setTimeout(() => {
+        if (done) return;
+        done = true;
+        void afterRaf().then(resolve);
+      }, 220);
+      try {
+        rvfc.call(video, () => {
+          if (done) return;
+          done = true;
+          window.clearTimeout(timer);
+          void afterRaf().then(resolve);
+        });
+      } catch {
+        window.clearTimeout(timer);
+        if (!done) {
+          done = true;
+          void afterRaf().then(resolve);
+        }
+      }
+    });
+  }
+
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
+}
+
+async function canvasToPngBuffer(canvas: HTMLCanvasElement): Promise<ArrayBuffer> {
+  const pngBlob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("Canvas PNG encode failed"))),
+      "image/png"
+    );
+  });
+  return pngBlob.arrayBuffer();
+}
+
 class LruUrlCache {
   private readonly map = new Map<string, string>();
   private readonly limit: number;
@@ -67,6 +338,9 @@ class ImageMemoryCache {
   private readonly inflightAvif = new Map<string, Promise<ItemDetail>>();
   private readonly inflightVideo = new Map<string, Promise<ItemDetail>>();
   private readonly failedPendingThumbs = new Set<string>();
+  private readonly thumbVersions = new Map<string, number>();
+  private readonly thumbListeners = new Map<string, Set<() => void>>();
+  private readonly knownHasThumb = new Set<string>();
   private videoQueueTail: Promise<void> = Promise.resolve();
   private epoch = 0;
   private lanMediaToken: string | null = null;
@@ -88,6 +362,51 @@ class ImageMemoryCache {
 
   hasPendingThumbnailFailed(itemId: string): boolean {
     return this.failedPendingThumbs.has(itemId);
+  }
+
+  getThumbnailVersion(itemId: string): number {
+    return this.thumbVersions.get(itemId) ?? 0;
+  }
+
+  hasKnownThumbnail(itemId: string): boolean {
+    return this.knownHasThumb.has(itemId);
+  }
+
+  subscribeThumbnailChange(itemId: string, listener: () => void): () => void {
+    let set = this.thumbListeners.get(itemId);
+    if (!set) {
+      set = new Set();
+      this.thumbListeners.set(itemId, set);
+    }
+    set.add(listener);
+    return () => {
+      const cur = this.thumbListeners.get(itemId);
+      if (!cur) return;
+      cur.delete(listener);
+      if (cur.size === 0) {
+        this.thumbListeners.delete(itemId);
+      }
+    };
+  }
+
+  notifyThumbnailsUpdated(itemIds: string[]): void {
+    for (const id of itemIds) {
+      this.failedPendingThumbs.delete(id);
+      this.knownHasThumb.add(id);
+      this.thumbs.delete(id);
+      this.inflightThumbs.delete(id);
+      this.thumbVersions.set(id, (this.thumbVersions.get(id) ?? 0) + 1);
+      const listeners = this.thumbListeners.get(id);
+      if (listeners) {
+        for (const fn of Array.from(listeners)) {
+          try {
+            fn();
+          } catch {
+            // ignore listener errors
+          }
+        }
+      }
+    }
   }
 
   getVaultMediaStreamUrl(itemId: string): string {
@@ -131,10 +450,13 @@ class ImageMemoryCache {
         const blob = new Blob([buf], { type: "image/webp" });
         const url = URL.createObjectURL(blob);
         this.thumbs.set(itemId, url);
+        this.knownHasThumb.add(itemId);
         return url;
       })
       .finally(() => {
-        this.inflightThumbs.delete(itemId);
+        if (this.inflightThumbs.get(itemId) === promise) {
+          this.inflightThumbs.delete(itemId);
+        }
       });
 
     this.inflightThumbs.set(itemId, promise);
@@ -161,7 +483,9 @@ class ImageMemoryCache {
         return url;
       })
       .finally(() => {
-        this.inflightFulls.delete(itemId);
+        if (this.inflightFulls.get(itemId) === promise) {
+          this.inflightFulls.delete(itemId);
+        }
       });
 
     this.inflightFulls.set(itemId, promise);
@@ -173,10 +497,16 @@ class ImageMemoryCache {
     void this.getFullImageUrl(itemId, mimeType).catch(() => {});
   }
 
-  processPendingAvifThumbnail(itemId: string): Promise<ItemDetail> {
-    if (this.failedPendingThumbs.has(itemId)) {
+  processPendingAvifThumbnail(
+    itemId: string,
+    options?: { force?: boolean }
+  ): Promise<ItemDetail> {
+    if (options?.force) {
+      this.failedPendingThumbs.delete(itemId);
+    } else if (this.failedPendingThumbs.has(itemId)) {
       return Promise.reject(new Error("AVIF thumbnail previously failed"));
     }
+
     const existing = this.inflightAvif.get(itemId);
     if (existing) return existing;
 
@@ -205,26 +535,19 @@ class ImageMemoryCache {
         }
         ctx.drawImage(bitmap, 0, 0, tw, th);
 
-        const pngBlob = await new Promise<Blob>((resolve, reject) => {
-          canvas.toBlob(
-            (b) => (b ? resolve(b) : reject(new Error("Canvas PNG encode failed"))),
-            "image/png"
-          );
-        });
-        const pngBytes = await pngBlob.arrayBuffer();
+        const pngBytes = await canvasToPngBuffer(canvas);
         if (this.epoch !== currentEpoch) {
           throw new Error("Vault closed");
         }
         const updated = await vaultApi.saveMediaThumbnail(itemId, pngBytes, origW, origH, 0);
-        this.failedPendingThumbs.delete(itemId);
-        this.thumbs.delete(itemId);
+        this.notifyThumbnailsUpdated([itemId]);
         return updated;
       } finally {
         bitmap.close();
       }
     })()
       .catch((err) => {
-        if (this.epoch === currentEpoch) {
+        if (this.epoch === currentEpoch && !options?.force) {
           this.failedPendingThumbs.add(itemId);
         }
         throw err;
@@ -239,8 +562,9 @@ class ImageMemoryCache {
 
   private captureVideoFrame(
     srcUrl: string,
-    useCrossOrigin: boolean
-  ): Promise<{ pngBytes: ArrayBuffer; width: number; height: number; durationMs: number }> {
+    useCrossOrigin: boolean,
+    explicitTimestampMs?: number
+  ): Promise<CapturedFrame> {
     return new Promise((resolve, reject) => {
       const video = document.createElement("video");
       video.muted = true;
@@ -251,12 +575,18 @@ class ImageMemoryCache {
       }
 
       let finished = false;
-      let seekTimer: number | null = null;
+      let activeSeekTimer: number | null = null;
+      let activeKickTimer: number | null = null;
+
       const cleanup = () => {
-        window.clearTimeout(timer);
-        if (seekTimer !== null) {
-          window.clearTimeout(seekTimer);
-          seekTimer = null;
+        window.clearTimeout(overallTimer);
+        if (activeSeekTimer !== null) {
+          window.clearTimeout(activeSeekTimer);
+          activeSeekTimer = null;
+        }
+        if (activeKickTimer !== null) {
+          window.clearTimeout(activeKickTimer);
+          activeKickTimer = null;
         }
         video.pause();
         video.onloadeddata = null;
@@ -273,83 +603,236 @@ class ImageMemoryCache {
         reject(err instanceof Error ? err : new Error(String(err)));
       };
 
-      const timer = window.setTimeout(() => {
-        fail(new Error("Video thumbnail timeout"));
-      }, 15_000);
-
-      const drawFrame = () => {
+      const succeed = (frame: CapturedFrame) => {
         if (finished) return;
-        if (seekTimer !== null) {
-          window.clearTimeout(seekTimer);
-          seekTimer = null;
-        }
-        try {
-          const origW = video.videoWidth || 320;
-          const origH = video.videoHeight || 240;
-          const durationMs =
-            Number.isFinite(video.duration) && video.duration > 0
-              ? Math.round(video.duration * 1000)
-              : 0;
-          const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
-          const tw = Math.max(1, Math.round(origW * scale));
-          const th = Math.max(1, Math.round(origH * scale));
+        finished = true;
+        cleanup();
+        resolve(frame);
+      };
 
-          const canvas = document.createElement("canvas");
-          canvas.width = tw;
-          canvas.height = th;
-          const ctx = canvas.getContext("2d");
-          if (!ctx) {
-            fail(new Error("Canvas context unavailable"));
+      const overallTimer = window.setTimeout(() => {
+        fail(new Error("Video thumbnail timeout"));
+      }, 20_000);
+
+      const seekTo = (targetSec: number): Promise<boolean> => {
+        if (finished) return Promise.resolve(false);
+        if (Math.abs((video.currentTime || 0) - targetSec) <= 0.05) {
+          return Promise.resolve(true);
+        }
+        return new Promise<boolean>((res) => {
+          let settled = false;
+          const finishSeek = (ok: boolean) => {
+            if (settled) return;
+            settled = true;
+            if (activeSeekTimer !== null) {
+              window.clearTimeout(activeSeekTimer);
+              activeSeekTimer = null;
+            }
+            video.onseeked = null;
+            res(ok);
+          };
+          video.onseeked = () => finishSeek(true);
+          activeSeekTimer = window.setTimeout(() => finishSeek(false), 4000);
+          try {
+            video.currentTime = targetSec;
+          } catch {
+            finishSeek(false);
+          }
+        });
+      };
+
+      const kickDecoder = async (): Promise<void> => {
+        if (finished) return;
+        await video.play().catch(() => {});
+        if (finished) return;
+        await new Promise<void>((res) => {
+          activeKickTimer = window.setTimeout(() => {
+            activeKickTimer = null;
+            res();
+          }, 120);
+        });
+        video.pause();
+        if (!finished) {
+          await waitForFrameSettle(video);
+        }
+      };
+
+      const renderAndInspect = async (): Promise<{
+        quality: FrameQuality;
+        frame?: CapturedFrame;
+      }> => {
+        const origW = video.videoWidth;
+        const origH = video.videoHeight;
+        if (!origW || !origH) {
+          throw new Error("Video dimensions unavailable");
+        }
+        const durationMs =
+          Number.isFinite(video.duration) && video.duration > 0
+            ? Math.round(video.duration * 1000)
+            : 0;
+        const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
+        const tw = Math.max(1, Math.round(origW * scale));
+        const th = Math.max(1, Math.round(origH * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = tw;
+        canvas.height = th;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) {
+          throw new Error("Canvas context unavailable");
+        }
+        ctx.clearRect(0, 0, tw, th);
+        ctx.drawImage(video, 0, 0, tw, th);
+        const quality = analyzeCanvasFrame(ctx, tw, th);
+        if (quality.kind === "blank" || quality.kind === "noise") {
+          return { quality };
+        }
+        const pngBytes = await canvasToPngBuffer(canvas);
+        return {
+          quality,
+          frame: { pngBytes, width: origW, height: origH, durationMs },
+        };
+      };
+
+      const runCapture = async () => {
+        if (!video.videoWidth || !video.videoHeight) {
+          fail(new Error("Video dimensions unavailable"));
+          return;
+        }
+
+        const dur = video.duration;
+        const maxTs = Number.isFinite(dur) && dur > 0 ? Math.max(0, dur - 0.1) : 0;
+
+        if (explicitTimestampMs !== undefined) {
+          const targetSec = Math.min(maxTs, Math.max(0, explicitTimestampMs / 1000));
+          await seekTo(targetSec);
+          if (finished) return;
+          await waitForFrameSettle(video);
+          if (finished) return;
+
+          let inspected = await renderAndInspect();
+          if (inspected.quality.kind === "blank") {
+            await kickDecoder();
+            if (finished) return;
+            if (Math.abs((video.currentTime || 0) - targetSec) > 0.35) {
+              await seekTo(targetSec);
+              if (finished) return;
+              await waitForFrameSettle(video);
+              if (finished) return;
+            }
+            inspected = await renderAndInspect();
+          }
+
+          if (inspected.quality.kind === "blank") {
+            fail(new Error("動画フレームを取得できませんでした"));
             return;
           }
-          ctx.drawImage(video, 0, 0, tw, th);
-          canvas.toBlob((blob) => {
-            if (!blob) {
-              fail(new Error("Canvas PNG encode failed"));
-              return;
-            }
-            void blob
-              .arrayBuffer()
-              .then((pngBytes) => {
-                if (finished) return;
-                finished = true;
-                cleanup();
-                resolve({ pngBytes, width: origW, height: origH, durationMs });
-              })
-              .catch(fail);
-          }, "image/png");
-        } catch (err) {
-          fail(err);
+          if (inspected.quality.kind === "noise") {
+            fail(
+              new Error(
+                "動画フレームの取得結果が破損しています（砂嵐検出）。設定画面で ffmpeg を導入すると安定して生成できます"
+              )
+            );
+            return;
+          }
+          if (inspected.frame) {
+            succeed(inspected.frame);
+          } else {
+            fail(new Error("動画フレームを取得できませんでした"));
+          }
+          return;
         }
+
+        const candidates = buildCandidateTimestampsSec(dur);
+        let bestFlat: { frame: CapturedFrame; score: number } | null = null;
+        let sawNoise = false;
+        let sawBlank = false;
+        let kickedOnce = false;
+
+        for (const ts of candidates) {
+          if (finished) return;
+          const seekOk = await seekTo(ts);
+          if (finished) return;
+          if (!seekOk && ts > 0.05) {
+            continue;
+          }
+          await waitForFrameSettle(video);
+          if (finished) return;
+
+          let inspected = await renderAndInspect();
+          if (inspected.quality.kind === "blank" && !kickedOnce) {
+            kickedOnce = true;
+            await kickDecoder();
+            if (finished) return;
+            if (Math.abs((video.currentTime || 0) - ts) > 0.35) {
+              await seekTo(ts);
+              if (finished) return;
+              await waitForFrameSettle(video);
+              if (finished) return;
+            }
+            inspected = await renderAndInspect();
+          }
+
+          if (inspected.quality.kind === "good" && inspected.frame) {
+            succeed(inspected.frame);
+            return;
+          }
+          if (inspected.quality.kind === "flat" && inspected.frame) {
+            if (!bestFlat || inspected.quality.score > bestFlat.score) {
+              bestFlat = { frame: inspected.frame, score: inspected.quality.score };
+            }
+          } else if (inspected.quality.kind === "noise") {
+            sawNoise = true;
+          } else if (inspected.quality.kind === "blank") {
+            sawBlank = true;
+          }
+        }
+
+        if (bestFlat) {
+          succeed(bestFlat.frame);
+          return;
+        }
+        if (sawNoise) {
+          fail(
+            new Error(
+              "動画フレームの取得結果が破損しています（砂嵐検出）。設定画面で ffmpeg を導入すると安定して生成できます"
+            )
+          );
+          return;
+        }
+        if (sawBlank) {
+          fail(new Error("動画フレームを取得できませんでした"));
+          return;
+        }
+        fail(new Error("動画の有効なフレームを取得できませんでした"));
       };
 
       video.onerror = () => fail(new Error("Video load error"));
       video.onloadeddata = () => {
         video.onloadeddata = null;
-        const dur = video.duration;
-        if (Number.isFinite(dur) && dur > 0.5) {
-          video.onseeked = drawFrame;
-          seekTimer = window.setTimeout(drawFrame, 4000);
-          try {
-            video.currentTime = Math.min(0.5, dur * 0.1);
-          } catch {
-            drawFrame();
-          }
-        } else {
-          drawFrame();
-        }
+        void runCapture().catch(fail);
       };
 
       video.src = srcUrl;
     });
   }
 
-  processPendingVideoThumbnail(itemId: string, mimeType: string): Promise<ItemDetail> {
-    if (this.failedPendingThumbs.has(itemId)) {
+  processPendingVideoThumbnail(
+    itemId: string,
+    mimeType: string,
+    options?: { force?: boolean; timestampMs?: number }
+  ): Promise<ItemDetail> {
+    const isManualOrForce = Boolean(options?.force || options?.timestampMs !== undefined);
+    if (isManualOrForce) {
+      this.failedPendingThumbs.delete(itemId);
+    } else if (this.failedPendingThumbs.has(itemId)) {
       return Promise.reject(new Error("Video thumbnail previously failed"));
     }
-    const existing = this.inflightVideo.get(itemId);
-    if (existing) return existing;
+
+    if (!isManualOrForce) {
+      const existing = this.inflightVideo.get(itemId);
+      if (existing) return existing;
+    }
 
     const currentEpoch = this.epoch;
     const runTask = async (): Promise<ItemDetail> => {
@@ -357,9 +840,25 @@ class ImageMemoryCache {
         throw new Error("Vault closed");
       }
 
-      let frame: { pngBytes: ArrayBuffer; width: number; height: number; durationMs: number };
+      const hostRes = await vaultApi.regenerateItemThumbnail(
+        itemId,
+        options?.timestampMs ?? null
+      );
+      if (this.epoch !== currentEpoch) {
+        throw new Error("Vault closed");
+      }
+      if (hostRes.status === "updated" && hostRes.detail) {
+        this.notifyThumbnailsUpdated([itemId]);
+        return hostRes.detail;
+      }
+
+      let frame: CapturedFrame;
       try {
-        frame = await this.captureVideoFrame(this.getVaultMediaStreamUrl(itemId), true);
+        frame = await this.captureVideoFrame(
+          this.getVaultMediaStreamUrl(itemId),
+          true,
+          options?.timestampMs
+        );
       } catch (streamErr) {
         if (this.epoch !== currentEpoch) {
           throw new Error("Vault closed");
@@ -370,7 +869,7 @@ class ImageMemoryCache {
         // Fallback to temporary in-memory Blob URL only for <=32 MiB videos if canvas readback fails
         const detail = await vaultApi.getItemDetail(itemId);
         if (detail.byteSize > 32 * 1024 * 1024) {
-          throw new Error("Large video thumbnail fallback skipped");
+          throw streamErr;
         }
         const bytes = await vaultApi.fetchImageBytes(itemId);
         if (this.epoch !== currentEpoch) {
@@ -379,7 +878,7 @@ class ImageMemoryCache {
         const resolvedMime = mimeType || detail.mimeType;
         const blobUrl = URL.createObjectURL(new Blob([bytes], { type: resolvedMime }));
         try {
-          frame = await this.captureVideoFrame(blobUrl, false);
+          frame = await this.captureVideoFrame(blobUrl, false, options?.timestampMs);
         } finally {
           URL.revokeObjectURL(blobUrl);
         }
@@ -396,8 +895,7 @@ class ImageMemoryCache {
         frame.height,
         frame.durationMs
       );
-      this.failedPendingThumbs.delete(itemId);
-      this.thumbs.delete(itemId);
+      this.notifyThumbnailsUpdated([itemId]);
       return updated;
     };
 
@@ -409,24 +907,113 @@ class ImageMemoryCache {
 
     const promise = queued
       .catch((err) => {
-        if (this.epoch === currentEpoch) {
+        if (this.epoch === currentEpoch && !isManualOrForce) {
           this.failedPendingThumbs.add(itemId);
         }
         throw err;
       })
       .finally(() => {
-        this.inflightVideo.delete(itemId);
+        if (this.inflightVideo.get(itemId) === promise) {
+          this.inflightVideo.delete(itemId);
+        }
       });
 
-    this.inflightVideo.set(itemId, promise);
+    if (!isManualOrForce) {
+      this.inflightVideo.set(itemId, promise);
+    }
     return promise;
+  }
+
+  async regenerateItemThumbnail(
+    itemId: string,
+    mimeType: string,
+    timestampMs?: number
+  ): Promise<ItemDetail> {
+    if (mimeType.startsWith("video/")) {
+      return this.processPendingVideoThumbnail(itemId, mimeType, {
+        force: true,
+        timestampMs,
+      });
+    }
+    if (mimeType === "image/avif") {
+      return this.processPendingAvifThumbnail(itemId, { force: true });
+    }
+    const res = await vaultApi.regenerateItemThumbnail(itemId, null);
+    if (res.status === "updated" && res.detail) {
+      this.notifyThumbnailsUpdated([itemId]);
+      return res.detail;
+    }
+    throw new Error("サムネイルの再生成に失敗しました");
+  }
+
+  async captureVideoThumbnailAt(
+    itemId: string,
+    videoEl: HTMLVideoElement,
+    timestampMs: number
+  ): Promise<ItemDetail> {
+    const currentEpoch = this.epoch;
+    const hostRes = await vaultApi.regenerateItemThumbnail(itemId, timestampMs);
+    if (this.epoch !== currentEpoch) {
+      throw new Error("Vault closed");
+    }
+    if (hostRes.status === "updated" && hostRes.detail) {
+      this.notifyThumbnailsUpdated([itemId]);
+      return hostRes.detail;
+    }
+
+    const origW = videoEl.videoWidth;
+    const origH = videoEl.videoHeight;
+    if (!origW || !origH) {
+      throw new Error("動画の現在のフレームを読み取れませんでした");
+    }
+    const durationMs =
+      Number.isFinite(videoEl.duration) && videoEl.duration > 0
+        ? Math.round(videoEl.duration * 1000)
+        : 0;
+    const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
+    const tw = Math.max(1, Math.round(origW * scale));
+    const th = Math.max(1, Math.round(origH * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      throw new Error("Canvas context unavailable");
+    }
+    ctx.drawImage(videoEl, 0, 0, tw, th);
+    const quality = analyzeCanvasFrame(ctx, tw, th);
+    if (quality.kind === "blank") {
+      throw new Error("動画フレームを取得できませんでした");
+    }
+    if (quality.kind === "noise") {
+      throw new Error(
+        "動画フレームの取得結果が破損しています（砂嵐検出）。設定画面で ffmpeg を導入すると安定して生成できます"
+      );
+    }
+
+    const pngBytes = await canvasToPngBuffer(canvas);
+    if (this.epoch !== currentEpoch) {
+      throw new Error("Vault closed");
+    }
+    const updated = await vaultApi.saveMediaThumbnail(
+      itemId,
+      pngBytes,
+      origW,
+      origH,
+      durationMs
+    );
+    this.notifyThumbnailsUpdated([itemId]);
+    return updated;
   }
 
   invalidateItems(itemIds: string[]): void {
     for (const id of itemIds) {
       this.thumbs.delete(id);
       this.fulls.delete(id);
+      this.inflightThumbs.delete(id);
       this.failedPendingThumbs.delete(id);
+      this.knownHasThumb.delete(id);
     }
   }
 
@@ -442,6 +1029,8 @@ class ImageMemoryCache {
     this.inflightAvif.clear();
     this.inflightVideo.clear();
     this.failedPendingThumbs.clear();
+    this.thumbVersions.clear();
+    this.knownHasThumb.clear();
     this.videoQueueTail = Promise.resolve();
   }
 }

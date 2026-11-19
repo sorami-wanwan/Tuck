@@ -189,7 +189,192 @@ pub fn extract_palette(img: &RgbaImage, max_colors: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn encode_webp_thumbnail(img: &DynamicImage) -> Result<GeneratedThumbnail, VaultError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameQualityKind {
+    Good,
+    FlatOrDark,
+    StaticNoise,
+    BlankTransparent,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FrameQuality {
+    pub kind: FrameQualityKind,
+    pub score: f64,
+}
+
+fn calc_std(sum: f64, sum2: f64, n: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mean = sum / n;
+    ((sum2 / n) - mean * mean).max(0.0).sqrt()
+}
+
+fn calc_pearson(n: u64, sx: f64, sy: f64, sx2: f64, sy2: f64, sxy: f64) -> f64 {
+    if n == 0 {
+        return 1.0;
+    }
+    let nf = n as f64;
+    let mx = sx / nf;
+    let my = sy / nf;
+    let vx = (sx2 / nf - mx * mx).max(0.0);
+    let vy = (sy2 / nf - my * my).max(0.0);
+    let denom = (vx * vy).sqrt();
+    if denom <= 1e-6 {
+        return 1.0;
+    }
+    ((sxy / nf) - mx * my) / denom
+}
+
+/// Evaluates whether an extracted frame looks like real visual content versus blank, flat/black, or random static noise.
+pub fn evaluate_frame_quality(rgba: &RgbaImage) -> FrameQuality {
+    let (w, h) = rgba.dimensions();
+    if w == 0 || h == 0 {
+        return FrameQuality {
+            kind: FrameQualityKind::BlankTransparent,
+            score: -1.0,
+        };
+    }
+
+    let step = (w.max(h) / 160).max(1) as usize;
+    let wu = w as usize;
+    let hu = h as usize;
+    let raw = rgba.as_raw();
+
+    let mut total_samples: u64 = 0;
+    let mut opaque_count: u64 = 0;
+    let mut dark_count: u64 = 0;
+    let mut bright_count: u64 = 0;
+
+    let (mut sum_r, mut sum_r2) = (0.0f64, 0.0f64);
+    let (mut sum_g, mut sum_g2) = (0.0f64, 0.0f64);
+    let (mut sum_b, mut sum_b2) = (0.0f64, 0.0f64);
+    let (mut sum_y, mut sum_y2) = (0.0f64, 0.0f64);
+
+    let (mut nh, mut sum_h_diff, mut sxh, mut syh, mut sxh2, mut syh2, mut sxyh) =
+        (0u64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let (mut nv, mut sum_v_diff, mut sxv, mut syv, mut sxv2, mut syv2, mut sxyv) =
+        (0u64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+
+    for y in (0..hu).step_by(step) {
+        for x in (0..wu).step_by(step) {
+            total_samples += 1;
+            let off = (y * wu + x) * 4;
+            let a = raw[off + 3];
+            if a < 16 {
+                continue;
+            }
+            opaque_count += 1;
+
+            let r = raw[off] as f64;
+            let g = raw[off + 1] as f64;
+            let b = raw[off + 2] as f64;
+            let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+            sum_r += r;
+            sum_r2 += r * r;
+            sum_g += g;
+            sum_g2 += g * g;
+            sum_b += b;
+            sum_b2 += b * b;
+            sum_y += lum;
+            sum_y2 += lum * lum;
+
+            if lum < 14.0 {
+                dark_count += 1;
+            }
+            if lum > 242.0 {
+                bright_count += 1;
+            }
+
+            if x + 1 < wu {
+                let off_h = (y * wu + (x + 1)) * 4;
+                if raw[off_h + 3] >= 16 {
+                    let r2 = raw[off_h] as f64;
+                    let g2 = raw[off_h + 1] as f64;
+                    let b2 = raw[off_h + 2] as f64;
+                    let lum2 = 0.299 * r2 + 0.587 * g2 + 0.114 * b2;
+                    sum_h_diff += ((r - r2).abs() + (g - g2).abs() + (b - b2).abs()) / 3.0;
+                    sxh += lum;
+                    syh += lum2;
+                    sxh2 += lum * lum;
+                    syh2 += lum2 * lum2;
+                    sxyh += lum * lum2;
+                    nh += 1;
+                }
+            }
+
+            if y + 1 < hu {
+                let off_v = ((y + 1) * wu + x) * 4;
+                if raw[off_v + 3] >= 16 {
+                    let r2 = raw[off_v] as f64;
+                    let g2 = raw[off_v + 1] as f64;
+                    let b2 = raw[off_v + 2] as f64;
+                    let lum2 = 0.299 * r2 + 0.587 * g2 + 0.114 * b2;
+                    sum_v_diff += ((r - r2).abs() + (g - g2).abs() + (b - b2).abs()) / 3.0;
+                    sxv += lum;
+                    syv += lum2;
+                    sxv2 += lum * lum;
+                    syv2 += lum2 * lum2;
+                    sxyv += lum * lum2;
+                    nv += 1;
+                }
+            }
+        }
+    }
+
+    if total_samples == 0 || opaque_count == 0 || (opaque_count as f64 / total_samples as f64) < 0.05
+    {
+        return FrameQuality {
+            kind: FrameQualityKind::BlankTransparent,
+            score: -1.0,
+        };
+    }
+
+    let nf = opaque_count as f64;
+    let std_y = calc_std(sum_y, sum_y2, nf);
+    let color_spread =
+        calc_std(sum_r, sum_r2, nf) + calc_std(sum_g, sum_g2, nf) + calc_std(sum_b, sum_b2, nf);
+    let dark_ratio = dark_count as f64 / nf;
+    let bright_ratio = bright_count as f64 / nf;
+
+    let corr_h = calc_pearson(nh, sxh, syh, sxh2, syh2, sxyh);
+    let corr_v = calc_pearson(nv, sxv, syv, sxv2, syv2, sxyv);
+    let mean_h_diff = if nh > 0 { sum_h_diff / nh as f64 } else { 0.0 };
+    let mean_v_diff = if nv > 0 { sum_v_diff / nv as f64 } else { 0.0 };
+
+    if (std_y < 7.0 && color_spread < 18.0)
+        || (dark_ratio > 0.96 && std_y < 16.0)
+        || (bright_ratio > 0.96 && std_y < 16.0)
+    {
+        return FrameQuality {
+            kind: FrameQualityKind::FlatOrDark,
+            score: std_y * 0.5 + color_spread * 0.1,
+        };
+    }
+
+    if std_y >= 10.0
+        && corr_h < 0.35
+        && corr_v < 0.35
+        && (mean_h_diff / std_y) > 0.78
+        && (mean_v_diff / std_y) > 0.78
+    {
+        return FrameQuality {
+            kind: FrameQualityKind::StaticNoise,
+            score: 5.0 + (corr_h.max(0.0) + corr_v.max(0.0)) * 10.0,
+        };
+    }
+
+    FrameQuality {
+        kind: FrameQualityKind::Good,
+        score: 100.0 + std_y.min(80.0) + (color_spread * 0.2).min(40.0) - (dark_ratio * 30.0),
+    }
+}
+
+pub fn encode_webp_thumbnail_with_quality(
+    img: &DynamicImage,
+) -> Result<(GeneratedThumbnail, FrameQuality), VaultError> {
     let resized = if img.width() > THUMB_MAX_EDGE || img.height() > THUMB_MAX_EDGE {
         img.resize(THUMB_MAX_EDGE, THUMB_MAX_EDGE, FilterType::Lanczos3)
     } else {
@@ -199,17 +384,26 @@ pub fn encode_webp_thumbnail(img: &DynamicImage) -> Result<GeneratedThumbnail, V
     let rgba = resized.to_rgba8();
     let tw = rgba.width();
     let th = rgba.height();
+    let quality = evaluate_frame_quality(&rgba);
     let palette = extract_palette(&rgba, 8);
 
     let encoder = webp::Encoder::from_rgba(rgba.as_raw(), tw, th);
     let webp_mem = encoder.encode(THUMB_WEBP_QUALITY);
 
-    Ok(GeneratedThumbnail {
-        data: webp_mem.to_vec(),
-        width: tw as i32,
-        height: th as i32,
-        palette,
-    })
+    Ok((
+        GeneratedThumbnail {
+            data: webp_mem.to_vec(),
+            width: tw as i32,
+            height: th as i32,
+            palette,
+        },
+        quality,
+    ))
+}
+
+pub fn encode_webp_thumbnail(img: &DynamicImage) -> Result<GeneratedThumbnail, VaultError> {
+    let (thumb, _) = encode_webp_thumbnail_with_quality(img)?;
+    Ok(thumb)
 }
 
 pub fn process_image_bytes(bytes: &[u8]) -> Result<ProcessedImage, VaultError> {
@@ -254,4 +448,56 @@ pub fn rgba_to_png_bytes(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
     img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
         .map_err(|e| VaultError::CorruptedImage(e.to_string()))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn test_evaluate_frame_quality_cases() {
+        // 1. Blank transparent
+        let blank = RgbaImage::from_pixel(120, 90, Rgba([0, 0, 0, 0]));
+        assert_eq!(
+            evaluate_frame_quality(&blank).kind,
+            FrameQualityKind::BlankTransparent
+        );
+
+        // 2. Flat/dark black frame
+        let black = RgbaImage::from_pixel(120, 90, Rgba([5, 5, 5, 255]));
+        assert_eq!(
+            evaluate_frame_quality(&black).kind,
+            FrameQualityKind::FlatOrDark
+        );
+
+        // 3. Static random RGB noise
+        let mut noise = RgbaImage::new(160, 120);
+        let mut seed: u64 = 0x1234_5678_9abc_def0;
+        for px in noise.pixels_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let r = ((seed >> 16) & 0xff) as u8;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let g = ((seed >> 16) & 0xff) as u8;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let b = ((seed >> 16) & 0xff) as u8;
+            *px = Rgba([r, g, b, 255]);
+        }
+        assert_eq!(
+            evaluate_frame_quality(&noise).kind,
+            FrameQualityKind::StaticNoise
+        );
+
+        // 4. Smooth gradient normal image
+        let mut grad = RgbaImage::new(160, 120);
+        for (x, y, px) in grad.enumerate_pixels_mut() {
+            let r = ((x * 255) / 160) as u8;
+            let g = ((y * 255) / 120) as u8;
+            let b = (((x + y) * 128) / 280) as u8;
+            *px = Rgba([r, g, b, 255]);
+        }
+        let gq = evaluate_frame_quality(&grad);
+        assert_eq!(gq.kind, FrameQualityKind::Good);
+        assert!(gq.score > 100.0);
+    }
 }

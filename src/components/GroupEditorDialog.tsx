@@ -16,9 +16,19 @@ interface GroupEditorDialogProps {
 }
 
 function PageThumb({ itemId }: { itemId: string }) {
+  const [thumbVer, setThumbVer] = useState<number>(() =>
+    imageMemoryCache.getThumbnailVersion(itemId)
+  );
   const [url, setUrl] = useState<string | undefined>(() =>
     imageMemoryCache.getCachedThumbnailUrl(itemId)
   );
+
+  useEffect(() => {
+    setThumbVer(imageMemoryCache.getThumbnailVersion(itemId));
+    return imageMemoryCache.subscribeThumbnailChange(itemId, () => {
+      setThumbVer(imageMemoryCache.getThumbnailVersion(itemId));
+    });
+  }, [itemId]);
 
   useEffect(() => {
     let active = true;
@@ -27,6 +37,7 @@ function PageThumb({ itemId }: { itemId: string }) {
       setUrl(cached);
       return;
     }
+    setUrl(undefined);
     void imageMemoryCache
       .getThumbnailUrl(itemId)
       .then((u) => {
@@ -36,7 +47,7 @@ function PageThumb({ itemId }: { itemId: string }) {
     return () => {
       active = false;
     };
-  }, [itemId]);
+  }, [itemId, thumbVer]);
 
   return (
     <div className="page-editor-thumb">

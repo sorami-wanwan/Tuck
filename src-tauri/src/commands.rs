@@ -18,12 +18,14 @@ use crate::models::{
     ImportReport, ItemDetail, LanAccessMode, LanInterfaceInfo, LanShareStatus, LockSettings,
     OptimizeReport, PackageExportReport, PackageExportRequest, PackageImportReport,
     PackageImportRequest, PlainExportBatchRequest, PlainExportItemRequest, PlainExportReport,
-    SearchQuery, StartLanShareRequest, TagWithCount, UrlImportSettings, VaultHealthInfo,
+    RegenerateThumbnailResult, SearchQuery, StartLanShareRequest, TagWithCount,
+    ThumbnailRegenScope, ThumbnailStats, ThumbnailTargetItem, UrlImportSettings, VaultHealthInfo,
     VaultStatus, YtdlpStatus,
 };
 use crate::package;
 use crate::plain_export;
 use crate::state::AppState;
+use crate::thumbnail_regen;
 use crate::ytdlp;
 use crate::{clear_global_lock_shortcuts, sync_global_lock_shortcut};
 
@@ -543,8 +545,50 @@ pub async fn save_media_thumbnail(
         })
     })
     .await?;
+    state.notify_lan_thumbnails_updated(vec![detail.id.clone()]);
     state.notify_lan_library_changed();
     Ok(detail)
+}
+
+#[tauri::command]
+pub async fn regenerate_item_thumbnail(
+    state: State<'_, AppState>,
+    item_id: String,
+    timestamp_ms: Option<i64>,
+) -> Result<RegenerateThumbnailResult, VaultError> {
+    let res = thumbnail_regen::regenerate_item_thumbnail_on_host(
+        state.inner().clone(),
+        item_id.clone(),
+        timestamp_ms,
+    )
+    .await?;
+    if res.status == "updated" {
+        state.notify_lan_thumbnails_updated(vec![item_id]);
+        state.notify_lan_library_changed();
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn list_thumbnail_targets(
+    state: State<'_, AppState>,
+    scope: ThumbnailRegenScope,
+    entries: Vec<EntryRef>,
+) -> Result<Vec<ThumbnailTargetItem>, VaultError> {
+    let db_arc = Arc::clone(&state.db);
+    run_blocking(move || with_open_db(&db_arc, |db| db.list_thumbnail_target_items(scope, &entries)))
+        .await
+}
+
+#[tauri::command]
+pub async fn get_thumbnail_stats(state: State<'_, AppState>) -> Result<ThumbnailStats, VaultError> {
+    let db_arc = Arc::clone(&state.db);
+    run_blocking(move || {
+        let ffmpeg_path = with_open_db(&db_arc, |db| Ok(db.get_url_import_settings().ffmpeg_path))?;
+        let ffmpeg_available = ytdlp::resolve_ffmpeg_binary(&ffmpeg_path).is_some();
+        with_open_db(&db_arc, |db| db.thumbnail_stats(ffmpeg_available))
+    })
+    .await
 }
 
 #[tauri::command]

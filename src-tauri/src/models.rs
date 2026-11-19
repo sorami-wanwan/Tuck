@@ -476,6 +476,43 @@ pub struct WebBatchExportTicketResponse {
     pub filename: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ThumbnailRegenScope {
+    Entries,
+    MissingOnly,
+    VideosOnly,
+    All,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailTargetItem {
+    pub item_id: String,
+    pub mime_type: String,
+    pub duration_ms: i64,
+    pub has_thumbnail: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailStats {
+    pub total_items: i64,
+    pub missing_count: i64,
+    pub video_count: i64,
+    pub ffmpeg_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegenerateThumbnailResult {
+    pub status: String,
+    pub item_id: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ItemDetail>,
+}
+
 /// Compares strings with embedded ASCII numbers sorted numerically (e.g. "p2.png" < "p10.png").
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut ia = a.chars().peekable();

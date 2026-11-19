@@ -35,6 +35,10 @@ impl LocalMediaServerHandle {
         self.token.as_str()
     }
 
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.shutdown_tx.lock() {

@@ -16,13 +16,13 @@ enum ChildStreamMsg {
     StderrDone,
 }
 
-pub(super) struct CapturedCommandOutput {
-    pub(super) status: ExitStatus,
-    pub(super) stdout: Vec<u8>,
-    pub(super) stderr: Vec<u8>,
+pub(crate) struct CapturedCommandOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
-pub(super) enum ChildRunFailure {
+pub(crate) enum ChildRunFailure {
     Cancelled,
     MemoryLimitExceeded,
     StagingLimitExceeded,
@@ -227,17 +227,17 @@ fn feed_progress_lines<F>(
     }
 }
 
-pub(super) struct MonitorOptions<'a> {
-    pub(super) total_timeout: Duration,
-    pub(super) stall_timeout: Duration,
-    pub(super) capture_stdout: bool,
-    pub(super) stdout_cap: usize,
-    pub(super) cancel: &'a AtomicBool,
-    pub(super) staging_watch: Option<(&'a Path, u64)>,
-    pub(super) item_total_hint: Option<usize>,
+pub(crate) struct MonitorOptions<'a> {
+    pub(crate) total_timeout: Duration,
+    pub(crate) stall_timeout: Duration,
+    pub(crate) capture_stdout: bool,
+    pub(crate) stdout_cap: usize,
+    pub(crate) cancel: &'a AtomicBool,
+    pub(crate) staging_watch: Option<(&'a Path, u64)>,
+    pub(crate) item_total_hint: Option<usize>,
 }
 
-pub(super) fn run_child_monitored<F>(
+pub(crate) fn run_child_monitored<F>(
     mut child: Child,
     opts: MonitorOptions<'_>,
     on_progress: &F,

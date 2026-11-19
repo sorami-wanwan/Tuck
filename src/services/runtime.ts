@@ -12,6 +12,7 @@ const SSE_EVENT_MAP: Record<string, string> = {
   "vault://lan-mode-changed": "lan_mode_changed",
   "vault://library-changed": "library_changed",
   "vault://url-import-progress": "url_import_progress",
+  "vault://thumbnails-updated": "thumbnails_updated",
 };
 
 const listeners = new Map<string, Set<EventHandler>>();

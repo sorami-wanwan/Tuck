@@ -21,9 +21,13 @@ import type {
   PlainExportBatchRequest,
   PlainExportItemRequest,
   PlainExportReport,
+  RegenerateThumbnailResult,
   SearchQuery,
   StartLanShareRequest,
   TagWithCount,
+  ThumbnailRegenScope,
+  ThumbnailStats,
+  ThumbnailTargetItem,
   UrlImportSettings,
   VaultCommandError,
   VaultHealthInfo,
@@ -308,6 +312,40 @@ export const vaultApi = {
       body: toFetchBody(pngBytes),
     });
     return (await res.json()) as ItemDetail;
+  },
+
+  regenerateItemThumbnail(
+    itemId: string,
+    timestampMs?: number | null
+  ): Promise<RegenerateThumbnailResult> {
+    if (isTauriRuntime()) {
+      return invoke("regenerate_item_thumbnail", {
+        itemId,
+        timestampMs: timestampMs ?? null,
+      });
+    }
+    return webJson<RegenerateThumbnailResult>(
+      `/api/items/${encodeURIComponent(itemId)}/thumbnail/regenerate`,
+      "POST",
+      { timestampMs: timestampMs ?? null }
+    );
+  },
+
+  listThumbnailTargets(
+    scope: ThumbnailRegenScope,
+    entries: EntryRef[] = []
+  ): Promise<ThumbnailTargetItem[]> {
+    if (isTauriRuntime()) {
+      return invoke("list_thumbnail_targets", { scope, entries });
+    }
+    return webJson<ThumbnailTargetItem[]>("/api/thumbnails/targets", "POST", {
+      scope,
+      entries,
+    });
+  },
+
+  getThumbnailStats(): Promise<ThumbnailStats> {
+    return invoke("get_thumbnail_stats");
   },
 
   queryEntries(query: SearchQuery): Promise<GalleryEntry[]> {

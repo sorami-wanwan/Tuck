@@ -16,6 +16,7 @@ import {
   Layers,
   Maximize2,
   Play,
+  RefreshCw,
   RotateCcw,
   Star,
   Trash2,
@@ -57,6 +58,8 @@ interface ThumbnailGridProps {
   onCreateGroupFromSelection: () => void;
   onRemoveSelectionFromFolder: () => void;
   onPlainExportSelection?: () => void;
+  regeneratingThumbnails?: boolean;
+  onRegenerateSelectionThumbnails?: () => void;
   onMoveSelectionToTrash: () => void;
   onRestoreAllTrash: () => void;
   onEmptyTrash: () => void;
@@ -120,12 +123,22 @@ function ThumbCard({
   onAvifCompleted,
 }: ThumbCardProps) {
   const coverId = entry.coverItemId;
+  const [thumbVer, setThumbVer] = useState<number>(() =>
+    imageMemoryCache.getThumbnailVersion(coverId)
+  );
   const [url, setUrl] = useState<string | undefined>(() =>
     imageMemoryCache.getCachedThumbnailUrl(coverId)
   );
   const [failed, setFailed] = useState(false);
   const onAvifCompletedRef = useRef(onAvifCompleted);
   onAvifCompletedRef.current = onAvifCompleted;
+
+  useEffect(() => {
+    setThumbVer(imageMemoryCache.getThumbnailVersion(coverId));
+    return imageMemoryCache.subscribeThumbnailChange(coverId, () => {
+      setThumbVer(imageMemoryCache.getThumbnailVersion(coverId));
+    });
+  }, [coverId]);
 
   useEffect(() => {
     let active = true;
@@ -139,7 +152,13 @@ function ThumbCard({
 
     const load = async () => {
       try {
-        if (!entry.coverHasThumbnail) {
+        const hasThumb =
+          entry.coverHasThumbnail || imageMemoryCache.hasKnownThumbnail(coverId);
+        if (!hasThumb) {
+          if (!canEdit) {
+            if (active) setFailed(true);
+            return;
+          }
           if (
             (entry.coverMimeType === "image/avif" || isVideoMime(entry.coverMimeType)) &&
             imageMemoryCache.hasPendingThumbnailFailed(coverId)
@@ -166,7 +185,7 @@ function ThumbCard({
     return () => {
       active = false;
     };
-  }, [coverId, entry.coverHasThumbnail, entry.coverMimeType]);
+  }, [coverId, entry.coverHasThumbnail, entry.coverMimeType, canEdit, thumbVer]);
 
   const isVideo = entry.kind === "image" && isVideoMime(entry.coverMimeType);
   const durationLabel = isVideo ? formatDurationMs(entry.durationMs) : "";
@@ -298,6 +317,8 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     onCreateGroupFromSelection,
     onRemoveSelectionFromFolder,
     onPlainExportSelection,
+    regeneratingThumbnails = false,
+    onRegenerateSelectionThumbnails,
     onMoveSelectionToTrash,
     onRestoreAllTrash,
     onEmptyTrash,
@@ -519,6 +540,17 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
             <button type="button" className="btn" onClick={onPlainExportSelection}>
               <Download size={13} />
               {isWebClient ? "ZIP でダウンロード" : "ファイルとして書き出し..."}
+            </button>
+          )}
+          {canEdit && onRegenerateSelectionThumbnails && (
+            <button
+              type="button"
+              className="btn"
+              disabled={regeneratingThumbnails}
+              onClick={onRegenerateSelectionThumbnails}
+            >
+              <RefreshCw size={13} className={regeneratingThumbnails ? "spin" : ""} />
+              サムネイル再生成
             </button>
           )}
           {canEdit && currentFolderId && (

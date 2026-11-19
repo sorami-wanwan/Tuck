@@ -15,7 +15,9 @@ use crate::imaging::is_video_mime;
 use crate::models::{EntryKind, EntryRef, ImportReport, UrlImportProgressEvent};
 
 pub use binary::check_ytdlp_status;
+pub(crate) use binary::{build_augmented_path, configure_tool_command, resolve_ffmpeg_binary};
 pub use download::download_from_url;
+pub(crate) use process::{run_child_monitored, ChildRunFailure, MonitorOptions};
 
 pub(super) const MEMORY_PIPE_MAX_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const META_TIMEOUT_SECS: u64 = 60;

@@ -1109,3 +1109,123 @@ fn test_skip_plain_export_confirm_persistence() {
     assert!(!reopened.set_skip_plain_export_confirm(false).unwrap());
     assert!(!reopened.status().unwrap().skip_plain_export_confirm);
 }
+
+#[test]
+fn test_thumbnail_regen_targets_stats_and_dimension_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("thumb_regen.vault");
+    let mut db = VaultDb::create(&vault_path, "pass-regen", false).unwrap();
+
+    let png_single = make_png_bytes(120, 90, 20, 120, 220, 255);
+    let png_p1 = make_png_bytes(100, 140, 40, 200, 60, 255);
+    let png_p2 = make_png_bytes(100, 140, 220, 80, 40, 255);
+    let png_trashed = make_png_bytes(80, 80, 200, 200, 20, 255);
+    let avif = make_minimal_avif_bytes();
+    let mp4 = make_minimal_mp4_bytes(b"THUMB_MP4");
+    let webm = make_minimal_webm_bytes();
+
+    let single_id = import_id(&mut db, &png_single, Some("SinglePng"));
+    let p1_id = import_id(&mut db, &png_p1, Some("Page1"));
+    let p2_id = import_id(&mut db, &png_p2, Some("Page2"));
+    let trashed_id = import_id(&mut db, &png_trashed, Some("Trashed"));
+    let avif_id = import_id(&mut db, &avif, Some("AvifPending"));
+    let mp4_id = import_id(&mut db, &mp4, Some("Mp4Pending"));
+    let webm_id = import_id(&mut db, &webm, Some("WebmVideo"));
+
+    let group = db
+        .create_group_from_items(&[p1_id.clone(), p2_id.clone()], Some("Manga"), None)
+        .unwrap();
+
+    // Give webm a bogus 320x240 thumbnail first, then overwrite with real 1920x1080, then preserve on 0x0
+    let thumb_png = make_png_bytes(320, 240, 90, 150, 210, 255);
+    let bogus = db
+        .save_media_thumbnail(&webm_id, &thumb_png, 320, 240, 1_000)
+        .unwrap();
+    assert!(bogus.has_thumbnail);
+    assert_eq!((bogus.width, bogus.height), (320, 240));
+
+    let fixed = db
+        .save_media_thumbnail(&webm_id, &thumb_png, 1920, 1080, 4_500)
+        .unwrap();
+    assert_eq!((fixed.width, fixed.height), (1920, 1080));
+    assert_eq!(fixed.duration_ms, 4_500);
+
+    let kept = db
+        .save_media_thumbnail(&webm_id, &thumb_png, 0, 0, 0)
+        .unwrap();
+    assert_eq!((kept.width, kept.height), (1920, 1080));
+    assert_eq!(kept.duration_ms, 4_500);
+
+    // Move trashed_id to trash; it must be excluded from all target scopes & stats
+    db.move_entries_to_trash(&[EntryRef {
+        kind: EntryKind::Image,
+        id: trashed_id.clone(),
+    }])
+    .unwrap();
+
+    let stats_ff = db.thumbnail_stats(true).unwrap();
+    assert_eq!(stats_ff.total_items, 6);
+    assert_eq!(stats_ff.missing_count, 2); // avif_id + mp4_id
+    assert_eq!(stats_ff.video_count, 2); // mp4_id + webm_id
+    assert!(stats_ff.ffmpeg_available);
+
+    let stats_no_ff = db.thumbnail_stats(false).unwrap();
+    assert!(!stats_no_ff.ffmpeg_available);
+
+    // Scope: Entries (expands group in page_order, deduplicates repeated refs, excludes trashed)
+    let entry_targets = db
+        .list_thumbnail_target_items(
+            ThumbnailRegenScope::Entries,
+            &[
+                EntryRef {
+                    kind: EntryKind::Image,
+                    id: single_id.clone(),
+                },
+                EntryRef {
+                    kind: EntryKind::Group,
+                    id: group.id.clone(),
+                },
+                EntryRef {
+                    kind: EntryKind::Image,
+                    id: p1_id.clone(),
+                },
+                EntryRef {
+                    kind: EntryKind::Image,
+                    id: trashed_id.clone(),
+                },
+            ],
+        )
+        .unwrap();
+    let entry_ids: Vec<&str> = entry_targets.iter().map(|t| t.item_id.as_str()).collect();
+    assert_eq!(
+        entry_ids,
+        vec![single_id.as_str(), p1_id.as_str(), p2_id.as_str()]
+    );
+
+    // Scope: MissingOnly
+    let missing_targets = db
+        .list_thumbnail_target_items(ThumbnailRegenScope::MissingOnly, &[])
+        .unwrap();
+    let mut missing_ids: Vec<&str> = missing_targets.iter().map(|t| t.item_id.as_str()).collect();
+    missing_ids.sort();
+    let mut expected_missing = vec![avif_id.as_str(), mp4_id.as_str()];
+    expected_missing.sort();
+    assert_eq!(missing_ids, expected_missing);
+
+    // Scope: VideosOnly
+    let video_targets = db
+        .list_thumbnail_target_items(ThumbnailRegenScope::VideosOnly, &[])
+        .unwrap();
+    let mut video_ids: Vec<&str> = video_targets.iter().map(|t| t.item_id.as_str()).collect();
+    video_ids.sort();
+    let mut expected_videos = vec![mp4_id.as_str(), webm_id.as_str()];
+    expected_videos.sort();
+    assert_eq!(video_ids, expected_videos);
+
+    // Scope: All
+    let all_targets = db
+        .list_thumbnail_target_items(ThumbnailRegenScope::All, &[])
+        .unwrap();
+    assert_eq!(all_targets.len(), 6);
+    assert!(!all_targets.iter().any(|t| t.item_id == trashed_id));
+}

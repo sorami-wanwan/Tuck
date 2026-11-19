@@ -398,3 +398,26 @@ export type PlainExportTarget =
   | { kind: "group"; groupId: string; title: string; pageCount?: number }
   | { kind: "entries"; entries: EntryRef[]; imageCount: number; groupCount: number }
   | { kind: "folder"; folderId: string; folderName: string };
+
+export type ThumbnailRegenScope = "entries" | "missingOnly" | "videosOnly" | "all";
+
+export interface ThumbnailTargetItem {
+  itemId: string;
+  mimeType: string;
+  durationMs: number;
+  hasThumbnail: boolean;
+}
+
+export interface ThumbnailStats {
+  totalItems: number;
+  missingCount: number;
+  videoCount: number;
+  ffmpegAvailable: boolean;
+}
+
+export interface RegenerateThumbnailResult {
+  status: "updated" | "clientRequired";
+  itemId: string;
+  mimeType: string;
+  detail?: ItemDetail;
+}

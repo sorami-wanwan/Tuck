@@ -24,6 +24,7 @@ import { useGallerySelection } from "./hooks/useGallerySelection";
 import { useImportFlow } from "./hooks/useImportFlow";
 import { useInternalDrag } from "./hooks/useInternalDrag";
 import { usePlainExport } from "./hooks/usePlainExport";
+import { useThumbnailRegen } from "./hooks/useThumbnailRegen";
 import { useToasts } from "./hooks/useToasts";
 import { useVaultSession } from "./hooks/useVaultSession";
 import { imageMemoryCache } from "./services/imageCache";
@@ -33,6 +34,7 @@ import {
   type EntryRef,
   type FolderNode,
   type GalleryEntry,
+  type ItemDetail,
   type LockSettings,
   type QueryScope,
   type SearchQuery,
@@ -49,6 +51,8 @@ export function App() {
   const { toasts, pushToast, dismissToast } = useToasts();
 
   const refreshLibraryRef = useRef<() => Promise<void>>(async () => {});
+  const refreshActiveDetailRef = useRef<() => Promise<void>>(async () => {});
+  const onItemDetailUpdatedRef = useRef<(detail: ItemDetail) => void>(() => {});
   const resetWorkspaceRef = useRef<() => void>(() => {});
   const readOnlyEnforcedRef = useRef<() => void>(() => {});
   const syncSelectionRef = useRef<(nextEntries: GalleryEntry[]) => void>(() => {});
@@ -180,6 +184,21 @@ export function App() {
     });
   }, []);
 
+  const thumbnailRegen = useThumbnailRegen({
+    canEdit,
+    refreshLibrary: triggerRefreshLibrary,
+    refreshActiveDetail: () => refreshActiveDetailRef.current(),
+    onItemDetailUpdated: (detail) => onItemDetailUpdatedRef.current(detail),
+    pushToast,
+  });
+
+  const handleRegenerateEntries = useCallback(
+    (refs: EntryRef[]) => {
+      void thumbnailRegen.regenerateEntries(refs);
+    },
+    [thumbnailRegen.regenerateEntries]
+  );
+
   const gallery = useGallerySelection({
     isOpen: status.isOpen,
     entries,
@@ -192,9 +211,33 @@ export function App() {
     refreshLibrary: triggerRefreshLibrary,
     onOpenExportPackageForEntries: handleOpenExportPackageForEntries,
     onPlainExport: requestPlainExport,
+    onRegenerateThumbnails: handleRegenerateEntries,
+    regeneratingThumbnails: thumbnailRegen.regenerating,
     pushToast,
   });
   syncSelectionRef.current = gallery.syncSelectionWithEntries;
+  refreshActiveDetailRef.current = async () => {
+    if (gallery.selectedEntryRefs.length !== 1) return;
+    const ref = gallery.selectedEntryRefs[0];
+    if (ref.kind === "image") {
+      try {
+        gallery.setItemDetail(await vaultApi.getItemDetail(ref.id));
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        gallery.setGroupDetail(await vaultApi.getGroupDetail(ref.id));
+      } catch {
+        // ignore
+      }
+    }
+  };
+  onItemDetailUpdatedRef.current = (updated) => {
+    if (gallery.itemDetail?.id === updated.id || gallery.lightboxId === updated.id) {
+      gallery.setItemDetail(updated);
+    }
+  };
 
   const handlePlainExportSelection = useCallback(() => {
     if (gallery.inspectorMode === "image" && gallery.itemDetail) {
@@ -688,6 +731,10 @@ export function App() {
                 .catch((err) => pushToast("error", formatErrorMessage(err)));
             }}
             onPlainExportSelection={handlePlainExportSelection}
+            regeneratingThumbnails={thumbnailRegen.regenerating}
+            onRegenerateSelectionThumbnails={() =>
+              void thumbnailRegen.regenerateEntries(gallery.selectedEntryRefs)
+            }
             onMoveSelectionToTrash={() => {
               if (gallery.selectedEntryRefs.length === 0) return;
               void vaultApi
@@ -840,6 +887,12 @@ export function App() {
                 }}
                 onCreateGroupFromSelection={gallery.handleCreateGroupFromSelection}
                 onPlainExport={handlePlainExportSelection}
+                regeneratingThumbnails={thumbnailRegen.regenerating}
+                onRegenerateThumbnails={
+                  !isTrashView && canEdit && gallery.selectedEntryRefs.length > 0
+                    ? () => void thumbnailRegen.regenerateEntries(gallery.selectedEntryRefs)
+                    : undefined
+                }
                 onMoveToTrash={async () => {
                   await vaultApi.moveEntriesToTrash(gallery.selectedEntryRefs);
                   pushToast("info", `${gallery.selectedEntryRefs.length}件をゴミ箱へ移動しました`);
@@ -920,6 +973,9 @@ export function App() {
             mimeType: item.coverMimeType,
           })
         }
+        regeneratingThumbnail={thumbnailRegen.regenerating}
+        onRegenerateThumbnails={handleRegenerateEntries}
+        onCaptureVideoThumbnail={thumbnailRegen.captureCurrentVideoFrame}
         onMoveToTrash={async (id) => {
           await vaultApi.moveEntriesToTrash([{ kind: "image", id }]);
           gallery.setLightboxId(null);
@@ -1118,7 +1174,7 @@ export function App() {
             setMaintenanceModal((prev) => ({ ...prev, open: false }))
           }
           onDataChanged={async (avifPendingIds, videoPendingIds) => {
-            await refreshLibrary();
+            await Promise.all([refreshLibrary(), refreshActiveDetailRef.current()]);
             importFlow.processPendingThumbnails(avifPendingIds ?? [], videoPendingIds ?? []);
           }}
           onToast={pushToast}

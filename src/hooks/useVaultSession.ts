@@ -325,6 +325,13 @@ export function useVaultSession({
       }, 300);
     });
 
+    void addSub<{ itemIds?: string[] }>("vault://thumbnails-updated", (payload) => {
+      if (!active || !Array.isArray(payload?.itemIds) || payload.itemIds.length === 0) {
+        return;
+      }
+      imageMemoryCache.notifyThumbnailsUpdated(payload.itemIds);
+    });
+
     if (isWebClient) {
       void addSub<{ reason?: string }>("vault://lan-stopped", (payload) => {
         if (!active) return;

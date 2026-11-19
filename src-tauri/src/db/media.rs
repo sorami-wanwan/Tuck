@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -9,8 +10,12 @@ use crate::crypto::{normalize_nfc_trimmed, sha256_file_hex, sha256_hex};
 use crate::error::VaultError;
 use crate::imaging::{
     detect_mime, is_video_mime, process_client_png_thumbnail, process_image_bytes,
+    GeneratedThumbnail,
 };
-use crate::models::{ItemDetail, TagWithCount};
+use crate::models::{
+    EntryKind, EntryRef, ItemDetail, TagWithCount, ThumbnailRegenScope, ThumbnailStats,
+    ThumbnailTargetItem,
+};
 
 use super::schema::{BLOB_CHUNK_SIZE, CHUNK_STORAGE_THRESHOLD};
 use super::{
@@ -232,15 +237,14 @@ impl VaultDb {
         })
     }
 
-    pub fn save_media_thumbnail(
+    pub fn save_generated_thumbnail(
         &mut self,
         item_id: &str,
-        png_bytes: &[u8],
+        thumb: &GeneratedThumbnail,
         orig_width: i32,
         orig_height: i32,
         duration_ms: i64,
     ) -> Result<ItemDetail, VaultError> {
-        let thumb = process_client_png_thumbnail(png_bytes)?;
         let palette_json =
             serde_json::to_string(&thumb.palette).unwrap_or_else(|_| "[]".to_string());
         let now = now_ms();
@@ -249,8 +253,8 @@ impl VaultDb {
         let tx = self.conn.transaction()?;
         let affected = tx.execute(
             "UPDATE items
-             SET width = CASE WHEN width = 0 THEN ?2 ELSE width END,
-                 height = CASE WHEN height = 0 THEN ?3 ELSE height END,
+             SET width = CASE WHEN ?2 > 0 THEN ?2 ELSE width END,
+                 height = CASE WHEN ?3 > 0 THEN ?3 ELSE height END,
                  duration_ms = CASE WHEN ?6 > 0 THEN ?6 ELSE duration_ms END,
                  palette = ?4,
                  updated_at = ?5
@@ -281,6 +285,174 @@ impl VaultDb {
         tx.commit()?;
 
         self.get_item_detail(item_id)
+    }
+
+    pub fn save_media_thumbnail(
+        &mut self,
+        item_id: &str,
+        png_bytes: &[u8],
+        orig_width: i32,
+        orig_height: i32,
+        duration_ms: i64,
+    ) -> Result<ItemDetail, VaultError> {
+        let thumb = process_client_png_thumbnail(png_bytes)?;
+        self.save_generated_thumbnail(item_id, &thumb, orig_width, orig_height, duration_ms)
+    }
+
+    pub fn regenerate_standard_image_thumbnail(
+        &mut self,
+        item_id: &str,
+    ) -> Result<ItemDetail, VaultError> {
+        let bytes = self.get_blob_bytes(item_id)?;
+        let processed = process_image_bytes(&bytes)?;
+        let thumb = processed.thumbnail.ok_or_else(|| {
+            VaultError::UnsupportedFormat(
+                "AVIF または動画はクライアントまたは ffmpeg での再生成が必要です".to_string(),
+            )
+        })?;
+        self.save_generated_thumbnail(item_id, &thumb, processed.width, processed.height, 0)
+    }
+
+    pub fn get_thumbnail_regen_item(
+        &self,
+        item_id: &str,
+    ) -> Result<ThumbnailTargetItem, VaultError> {
+        self.conn
+            .query_row(
+                "SELECT id, mime_type, duration_ms,
+                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = items.id) AS has_thumb
+                 FROM items
+                 WHERE id = ?1",
+                params![item_id],
+                |r| {
+                    let has_thumb: i64 = r.get(3)?;
+                    Ok(ThumbnailTargetItem {
+                        item_id: r.get(0)?,
+                        mime_type: r.get(1)?,
+                        duration_ms: r.get(2)?,
+                        has_thumbnail: has_thumb != 0,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| VaultError::NotFound(item_id.to_string()))
+    }
+
+    pub fn list_thumbnail_target_items(
+        &self,
+        scope: ThumbnailRegenScope,
+        entries: &[EntryRef],
+    ) -> Result<Vec<ThumbnailTargetItem>, VaultError> {
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<ThumbnailTargetItem> {
+            let has_thumb: i64 = r.get(3)?;
+            Ok(ThumbnailTargetItem {
+                item_id: r.get(0)?,
+                mime_type: r.get(1)?,
+                duration_ms: r.get(2)?,
+                has_thumbnail: has_thumb != 0,
+            })
+        };
+
+        if scope == ThumbnailRegenScope::Entries {
+            let mut out = Vec::new();
+            let mut seen = HashSet::new();
+            for entry in entries {
+                match entry.kind {
+                    EntryKind::Image => {
+                        let item = self
+                            .conn
+                            .query_row(
+                                "SELECT id, mime_type, duration_ms,
+                                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = items.id)
+                                 FROM items
+                                 WHERE id = ?1 AND deleted_at IS NULL",
+                                params![entry.id],
+                                map_row,
+                            )
+                            .optional()?;
+                        if let Some(it) = item {
+                            if seen.insert(it.item_id.clone()) {
+                                out.push(it);
+                            }
+                        }
+                    }
+                    EntryKind::Group => {
+                        let mut stmt = self.conn.prepare(
+                            "SELECT i.id, i.mime_type, i.duration_ms,
+                                    EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = i.id)
+                             FROM group_items gi
+                             JOIN groups g ON g.id = gi.group_id
+                             JOIN items i ON i.id = gi.item_id
+                             WHERE gi.group_id = ?1
+                               AND g.deleted_at IS NULL
+                               AND i.deleted_at IS NULL
+                             ORDER BY gi.page_order ASC",
+                        )?;
+                        let rows = stmt.query_map(params![entry.id], map_row)?;
+                        for row in rows {
+                            let it = row?;
+                            if seen.insert(it.item_id.clone()) {
+                                out.push(it);
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(out);
+        }
+
+        let sql = match scope {
+            ThumbnailRegenScope::MissingOnly => {
+                "SELECT i.id, i.mime_type, i.duration_ms, 0
+                 FROM items i
+                 WHERE i.deleted_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM thumbnails th WHERE th.item_id = i.id)
+                 ORDER BY i.created_at DESC"
+            }
+            ThumbnailRegenScope::VideosOnly => {
+                "SELECT i.id, i.mime_type, i.duration_ms,
+                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = i.id)
+                 FROM items i
+                 WHERE i.deleted_at IS NULL
+                   AND i.mime_type LIKE 'video/%'
+                 ORDER BY i.created_at DESC"
+            }
+            ThumbnailRegenScope::All => {
+                "SELECT i.id, i.mime_type, i.duration_ms,
+                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = i.id)
+                 FROM items i
+                 WHERE i.deleted_at IS NULL
+                 ORDER BY i.created_at DESC"
+            }
+            ThumbnailRegenScope::Entries => unreachable!(),
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], map_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn thumbnail_stats(&self, ffmpeg_available: bool) -> Result<ThumbnailStats, VaultError> {
+        let (total_items, missing_count, video_count): (i64, i64, i64) = self.conn.query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM thumbnails th WHERE th.item_id = i.id) THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN i.mime_type LIKE 'video/%' THEN 1 ELSE 0 END), 0)
+             FROM items i
+             WHERE i.deleted_at IS NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(ThumbnailStats {
+            total_items,
+            missing_count,
+            video_count,
+            ffmpeg_available,
+        })
     }
 
     pub fn get_item_detail(&self, item_id: &str) -> Result<ItemDetail, VaultError> {

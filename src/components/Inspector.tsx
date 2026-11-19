@@ -10,6 +10,7 @@ import {
   Maximize2,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   Star,
   Trash2,
@@ -61,6 +62,8 @@ interface InspectorProps {
   onUngroup?: () => Promise<void>;
   onCreateGroupFromSelection?: () => Promise<void>;
   onPlainExport?: () => void;
+  regeneratingThumbnails?: boolean;
+  onRegenerateThumbnails?: () => void;
   onMoveToTrash: () => Promise<void>;
   onRestoreFromTrash: () => Promise<void>;
   onPermanentlyDelete: () => Promise<void>;
@@ -107,6 +110,8 @@ export function Inspector(props: InspectorProps) {
     onUngroup,
     onCreateGroupFromSelection,
     onPlainExport,
+    regeneratingThumbnails = false,
+    onRegenerateThumbnails,
     onMoveToTrash,
     onRestoreFromTrash,
     onPermanentlyDelete,
@@ -158,6 +163,19 @@ export function Inspector(props: InspectorProps) {
         ? groupDetail?.pages[0]?.itemId
         : undefined;
 
+  const [previewThumbVer, setPreviewThumbVer] = useState(0);
+
+  useEffect(() => {
+    if (!previewCoverItemId || hidePreview) {
+      setPreviewThumbVer(0);
+      return;
+    }
+    setPreviewThumbVer(imageMemoryCache.getThumbnailVersion(previewCoverItemId));
+    return imageMemoryCache.subscribeThumbnailChange(previewCoverItemId, () => {
+      setPreviewThumbVer(imageMemoryCache.getThumbnailVersion(previewCoverItemId));
+    });
+  }, [previewCoverItemId, hidePreview]);
+
   useEffect(() => {
     if (!previewCoverItemId || hidePreview) {
       setPreviewUrl(undefined);
@@ -179,7 +197,7 @@ export function Inspector(props: InspectorProps) {
     return () => {
       active = false;
     };
-  }, [previewCoverItemId, hidePreview]);
+  }, [previewCoverItemId, hidePreview, previewThumbVer]);
 
   const folderMap = useMemo(() => {
     const map = new Map<string, FolderNode>();
@@ -293,6 +311,17 @@ export function Inspector(props: InspectorProps) {
                       {isWebClient
                         ? "選択項目を ZIP でダウンロード"
                         : "選択項目をファイルとして書き出し..."}
+                    </button>
+                  )}
+                  {!readOnly && onRegenerateThumbnails && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={regeneratingThumbnails}
+                      onClick={onRegenerateThumbnails}
+                    >
+                      <RefreshCw size={13} className={regeneratingThumbnails ? "spin" : ""} />
+                      {regeneratingThumbnails ? "再生成中..." : "サムネイルを再生成"}
                     </button>
                   )}
                   {!readOnly && currentFolderId && (
@@ -926,6 +955,18 @@ export function Inspector(props: InspectorProps) {
                     : mode === "group"
                       ? "フォルダとして書き出し..."
                       : "ファイルとして書き出し..."}
+                </button>
+              )}
+
+              {!readOnly && onRegenerateThumbnails && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={regeneratingThumbnails}
+                  onClick={onRegenerateThumbnails}
+                >
+                  <RefreshCw size={13} className={regeneratingThumbnails ? "spin" : ""} />
+                  {regeneratingThumbnails ? "再生成中..." : "サムネイルを再生成"}
                 </button>
               )}
 

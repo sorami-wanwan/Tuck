@@ -11,7 +11,7 @@ use crate::models::{UrlImportSettings, YtdlpStatus};
 use super::is_valid_cookie_browser;
 use super::process::{extract_ytdlp_error_line, run_child_monitored, MonitorOptions};
 
-pub(super) fn build_augmented_path() -> String {
+pub(crate) fn build_augmented_path() -> String {
     let existing = env::var("PATH").unwrap_or_default();
     #[cfg(unix)]
     {
@@ -56,7 +56,7 @@ pub(super) fn build_augmented_path() -> String {
     }
 }
 
-pub(super) fn configure_tool_command(cmd: &mut Command, aug_path: &str) {
+pub(crate) fn configure_tool_command(cmd: &mut Command, aug_path: &str) {
     cmd.env("PATH", aug_path)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8");

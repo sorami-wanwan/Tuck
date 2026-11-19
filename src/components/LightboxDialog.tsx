@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Camera,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -14,6 +15,7 @@ import { useViewportPhysics } from "../hooks/useViewportPhysics";
 import { imageMemoryCache } from "../services/imageCache";
 import {
   isVideoMime,
+  type EntryRef,
   type FolderNode,
   type GalleryEntry,
   type ItemDetail,
@@ -45,6 +47,12 @@ interface LightboxDialogProps {
   onAddToFolder: (folderId: string, itemId: string) => Promise<void>;
   onRemoveFromFolder: (folderId: string, itemId: string) => Promise<void>;
   onPlainExport?: (item: GalleryEntry) => void;
+  regeneratingThumbnail?: boolean;
+  onRegenerateThumbnails?: (entries: EntryRef[]) => void;
+  onCaptureVideoThumbnail?: (
+    itemId: string,
+    videoEl: HTMLVideoElement | null
+  ) => Promise<void>;
   onMoveToTrash: (itemId: string) => Promise<void>;
   onRestoreFromTrash: (itemId: string) => Promise<void>;
   onPermanentlyDelete: (itemId: string) => Promise<void>;
@@ -75,6 +83,9 @@ export function LightboxDialog({
   onAddToFolder,
   onRemoveFromFolder,
   onPlainExport,
+  regeneratingThumbnail = false,
+  onRegenerateThumbnails,
+  onCaptureVideoThumbnail,
   onMoveToTrash,
   onRestoreFromTrash,
   onPermanentlyDelete,
@@ -306,17 +317,37 @@ export function LightboxDialog({
 
           <div className="lightbox-controls">
             {isVideo ? (
-              <button
-                type="button"
-                className={`pill-btn ${videoLoop ? "active" : ""}`}
-                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-                title="ループ再生を切替"
-                aria-pressed={videoLoop}
-                onClick={() => setVideoLoop((v) => !v)}
-              >
-                <Repeat size={12} />
-                ループ再生
-              </button>
+              <>
+                <button
+                  type="button"
+                  className={`pill-btn ${videoLoop ? "active" : ""}`}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                  title="ループ再生を切替"
+                  aria-pressed={videoLoop}
+                  onClick={() => setVideoLoop((v) => !v)}
+                >
+                  <Repeat size={12} />
+                  ループ再生
+                </button>
+                {!readOnly &&
+                  currentItem &&
+                  currentItem.deletedAt === null &&
+                  onCaptureVideoThumbnail && (
+                    <button
+                      type="button"
+                      className="pill-btn"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                      title="現在表示している動画フレームをサムネイルに設定"
+                      disabled={regeneratingThumbnail || videoError || !videoUrl}
+                      onClick={() =>
+                        void onCaptureVideoThumbnail(currentItem.id, videoRef.current)
+                      }
+                    >
+                      <Camera size={12} />
+                      {regeneratingThumbnail ? "生成中..." : "現在のフレームをサムネイルに"}
+                    </button>
+                  )}
+              </>
             ) : (
               <>
                 <button
@@ -529,6 +560,12 @@ export function LightboxDialog({
             onAddToFolder={(fid) => onAddToFolder(fid, currentItem.id)}
             onRemoveFromFolder={(fid) => onRemoveFromFolder(fid, currentItem.id)}
             onPlainExport={onPlainExport ? () => onPlainExport(currentItem) : undefined}
+            regeneratingThumbnails={regeneratingThumbnail}
+            onRegenerateThumbnails={
+              onRegenerateThumbnails
+                ? () => onRegenerateThumbnails([{ kind: "image", id: currentItem.id }])
+                : undefined
+            }
             onMoveToTrash={() => onMoveToTrash(currentItem.id)}
             onRestoreFromTrash={() => onRestoreFromTrash(currentItem.id)}
             onPermanentlyDelete={() => onPermanentlyDelete(currentItem.id)}

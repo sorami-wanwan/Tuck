@@ -164,6 +164,37 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn get_or_start_local_media_server(
+        &self,
+    ) -> Result<LocalMediaServerHandle, VaultError> {
+        if !self.is_open() {
+            return Err(VaultError::VaultNotOpen);
+        }
+        if let Ok(guard) = self.local_media_server.lock() {
+            if let Some(existing) = guard.as_ref() {
+                if !existing.is_stopped() {
+                    return Ok(existing.clone());
+                }
+            }
+        }
+        let handle = start_local_media_server(self.clone()).await?;
+        let mut guard = self.local_media_server.lock().map_err(|_| {
+            VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string())
+        })?;
+        if !self.is_open() {
+            handle.stop();
+            return Err(VaultError::VaultNotOpen);
+        }
+        if let Some(existing) = guard.as_ref() {
+            if !existing.is_stopped() {
+                handle.stop();
+                return Ok(existing.clone());
+            }
+        }
+        *guard = Some(handle.clone());
+        Ok(handle)
+    }
+
     pub fn begin_url_import(&self) -> Result<Arc<AtomicBool>, VaultError> {
         let mut guard = self
             .url_import_cancel
@@ -241,6 +272,16 @@ impl AppState {
         }
     }
 
+    pub fn notify_lan_thumbnails_updated(&self, item_ids: Vec<String>) {
+        if item_ids.is_empty() {
+            return;
+        }
+        let handle = self.lan_server.lock().ok().and_then(|g| g.clone());
+        if let Some(h) = handle {
+            h.broadcast_thumbnails_updated(item_ids);
+        }
+    }
+
     /// Stops any active LAN server, drops the open DB handle, purges RAM media cache, and stops clipboard watch while retaining path for password unlock.
     pub fn lock_vault(&self) {
         self.stop_lan_share_with_reason("vault_locked");
@@ -273,6 +314,7 @@ impl AppState {
         match maybe_status {
             Some(mut status) => {
                 status.clipboard_watch_enabled = watch;
+                #[cfg(target_os = "linux")]
                 if let Ok(lms) = self.local_media_server.lock() {
                     if let Some(handle) = lms.as_ref() {
                         status.local_media_base_url = Some(handle.base_url().to_string());

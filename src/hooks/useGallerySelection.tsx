@@ -17,6 +17,7 @@ import {
   ListOrdered,
   Maximize2,
   Play,
+  RefreshCw,
   RotateCcw,
   Trash2,
   Unlink,
@@ -49,6 +50,8 @@ interface UseGallerySelectionOptions {
   refreshLibrary: () => Promise<void>;
   onOpenExportPackageForEntries: (entries: EntryRef[]) => void;
   onPlainExport: (target: PlainExportTarget) => void;
+  onRegenerateThumbnails?: (entries: EntryRef[]) => void;
+  regeneratingThumbnails?: boolean;
   pushToast: (tone: ToastItem["tone"], message: string) => void;
 }
 
@@ -67,6 +70,8 @@ export function useGallerySelection({
   refreshLibrary,
   onOpenExportPackageForEntries,
   onPlainExport,
+  onRegenerateThumbnails,
+  regeneratingThumbnails = false,
   pushToast,
 }: UseGallerySelectionOptions) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
@@ -446,6 +451,19 @@ export function useGallerySelection({
       return itemsList;
     }
 
+    if (onRegenerateThumbnails) {
+      itemsList.push({
+        id: "regen-thumb",
+        label:
+          selectedEntryRefs.length > 1
+            ? `サムネイルを再生成 (${selectedEntryRefs.length}件)`
+            : "サムネイルを再生成",
+        icon: <RefreshCw size={13} />,
+        disabled: regeneratingThumbnails,
+        onClick: () => onRegenerateThumbnails([...selectedEntryRefs]),
+      });
+    }
+
     itemsList.push({
       id: "add-folder",
       label: "フォルダに追加...",
@@ -566,6 +584,8 @@ export function useGallerySelection({
     requestPermanentDelete,
     onOpenExportPackageForEntries,
     onPlainExport,
+    onRegenerateThumbnails,
+    regeneratingThumbnails,
   ]);
 
   return {
