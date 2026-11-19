@@ -531,7 +531,10 @@ pub fn export_partial_package(
 
         tx.commit()?;
         drop(dest_db);
-        fs::OpenOptions::new().write(true).open(&tmp_path)?.sync_all()?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)?
+            .sync_all()?;
         Ok((distinct_tags.len(), group_page_item_ids.len()))
     })();
 
