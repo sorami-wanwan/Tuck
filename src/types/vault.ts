@@ -114,6 +114,8 @@ export interface VaultStatus {
   skipPlainExportConfirm: boolean;
   lockSettings: LockSettings;
   urlImportSettings: UrlImportSettings;
+  localMediaBaseUrl?: string | null;
+  localMediaToken?: string | null;
 }
 
 export interface FolderNode {

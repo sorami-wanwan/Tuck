@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod imaging;
 mod lan_server;
+mod local_media;
 mod media_stream;
 mod models;
 mod package;
@@ -25,7 +26,7 @@ use tauri::http::{header, Method, Response, StatusCode};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-fn resolve_allowed_origin(origin: &str) -> Option<&'static str> {
+pub(crate) fn resolve_allowed_origin(origin: &str) -> Option<&'static str> {
     const PROD_ORIGINS: &[&str] = &[
         "tauri://localhost",
         "http://tauri.localhost",

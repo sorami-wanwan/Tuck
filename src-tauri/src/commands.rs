@@ -122,10 +122,9 @@ pub async fn create_vault(
     overwrite: bool,
 ) -> Result<VaultStatus, VaultError> {
     let state_clone = state.inner().clone();
-    let status = run_blocking(move || {
+    run_blocking(move || {
         state_clone.close_vault();
         let db = VaultDb::create(Path::new(&path), &passphrase, overwrite)?;
-        let status = db.status()?;
         {
             let mut p = state_clone.locked_path.lock().map_err(|_| {
                 VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string())
@@ -136,10 +135,14 @@ pub async fn create_vault(
             let mut guard = state_clone.lock_db()?;
             *guard = Some(db);
         }
-        Ok(status)
+        Ok(())
     })
     .await?;
 
+    #[cfg(target_os = "linux")]
+    state.ensure_local_media_server().await?;
+
+    let status = state.current_status()?;
     sync_global_lock_shortcut(&app, &status.lock_settings.shortcut);
     Ok(status)
 }
@@ -152,10 +155,9 @@ pub async fn open_vault(
     passphrase: String,
 ) -> Result<VaultStatus, VaultError> {
     let state_clone = state.inner().clone();
-    let status = run_blocking(move || {
+    run_blocking(move || {
         state_clone.close_vault();
         let db = VaultDb::open(Path::new(&path), &passphrase)?;
-        let status = db.status()?;
         {
             let mut p = state_clone.locked_path.lock().map_err(|_| {
                 VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string())
@@ -166,10 +168,14 @@ pub async fn open_vault(
             let mut guard = state_clone.lock_db()?;
             *guard = Some(db);
         }
-        Ok(status)
+        Ok(())
     })
     .await?;
 
+    #[cfg(target_os = "linux")]
+    state.ensure_local_media_server().await?;
+
+    let status = state.current_status()?;
     sync_global_lock_shortcut(&app, &status.lock_settings.shortcut);
     Ok(status)
 }
@@ -181,7 +187,7 @@ pub async fn unlock_vault(
     passphrase: String,
 ) -> Result<VaultStatus, VaultError> {
     let state_clone = state.inner().clone();
-    let status = run_blocking(move || {
+    run_blocking(move || {
         let path = {
             let guard = state_clone.locked_path.lock().map_err(|_| {
                 VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string())
@@ -189,15 +195,18 @@ pub async fn unlock_vault(
             guard.clone().ok_or(VaultError::VaultNotOpen)?
         };
         let db = VaultDb::open(&path, &passphrase)?;
-        let status = db.status()?;
         {
             let mut guard = state_clone.lock_db()?;
             *guard = Some(db);
         }
-        Ok(status)
+        Ok(())
     })
     .await?;
 
+    #[cfg(target_os = "linux")]
+    state.ensure_local_media_server().await?;
+
+    let status = state.current_status()?;
     sync_global_lock_shortcut(&app, &status.lock_settings.shortcut);
     Ok(status)
 }

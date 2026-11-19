@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::db::VaultDb;
 use crate::error::VaultError;
 use crate::lan_server::{list_lan_interfaces, LanServerHandle};
+use crate::local_media::{start_local_media_server, LocalMediaServerHandle};
 use crate::models::{LanShareStatus, UrlImportProgressEvent, VaultStatus};
 
 const MEDIA_RAM_CACHE_LIMIT: usize = 2;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub media_cache: Arc<Mutex<Vec<CachedMediaBlob>>>,
     pub url_import_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     pub lan_server: Arc<Mutex<Option<LanServerHandle>>>,
+    pub local_media_server: Arc<Mutex<Option<LocalMediaServerHandle>>>,
 }
 
 impl AppState {
@@ -121,6 +123,47 @@ impl AppState {
         db.read_media_range(item_id, start, end, chunk_size)
     }
 
+    pub fn read_blob_chunk(
+        &self,
+        item_id: &str,
+        chunk_index: i64,
+    ) -> Result<Option<Vec<u8>>, VaultError> {
+        let guard = self.lock_db()?;
+        let db = guard.as_ref().ok_or(VaultError::VaultNotOpen)?;
+        db.read_blob_chunk(item_id, chunk_index)
+    }
+
+    pub fn stop_local_media_server(&self) {
+        let handle = self
+            .local_media_server
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(h) = handle {
+            h.stop();
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub async fn ensure_local_media_server(&self) -> Result<(), VaultError> {
+        self.stop_local_media_server();
+        if !self.is_open() {
+            return Ok(());
+        }
+        let handle = start_local_media_server(self.clone()).await?;
+        let mut guard = self.local_media_server.lock().map_err(|_| {
+            VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string())
+        })?;
+        if !self.is_open() {
+            handle.stop();
+            return Ok(());
+        }
+        if let Some(old) = guard.replace(handle) {
+            old.stop();
+        }
+        Ok(())
+    }
+
     pub fn begin_url_import(&self) -> Result<Arc<AtomicBool>, VaultError> {
         let mut guard = self
             .url_import_cancel
@@ -207,6 +250,7 @@ impl AppState {
         if let Ok(mut guard) = self.db.lock() {
             *guard = None;
         }
+        self.stop_local_media_server();
     }
 
     /// Completely closes the vault and forgets the path.
@@ -218,12 +262,23 @@ impl AppState {
     }
 
     pub fn current_status(&self) -> Result<VaultStatus, VaultError> {
-        let guard = self.lock_db()?;
         let watch = self.clipboard_watch_enabled.load(Ordering::SeqCst);
-        match guard.as_ref() {
-            Some(db) => {
-                let mut status = db.status()?;
+        let maybe_status = {
+            let guard = self.lock_db()?;
+            match guard.as_ref() {
+                Some(db) => Some(db.status()?),
+                None => None,
+            }
+        };
+        match maybe_status {
+            Some(mut status) => {
                 status.clipboard_watch_enabled = watch;
+                if let Ok(lms) = self.local_media_server.lock() {
+                    if let Some(handle) = lms.as_ref() {
+                        status.local_media_base_url = Some(handle.base_url().to_string());
+                        status.local_media_token = Some(handle.token().to_string());
+                    }
+                }
                 Ok(status)
             }
             None => Ok(VaultStatus {

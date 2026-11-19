@@ -66,11 +66,28 @@ class ImageMemoryCache {
   private readonly inflightFulls = new Map<string, Promise<string>>();
   private readonly inflightAvif = new Map<string, Promise<ItemDetail>>();
   private readonly inflightVideo = new Map<string, Promise<ItemDetail>>();
+  private readonly failedPendingThumbs = new Set<string>();
+  private videoQueueTail: Promise<void> = Promise.resolve();
   private epoch = 0;
   private lanMediaToken: string | null = null;
+  private localMediaBaseUrl: string | null = null;
+  private localMediaToken: string | null = null;
 
   setLanMediaToken(token: string | null): void {
     this.lanMediaToken = token;
+  }
+
+  setLocalMediaEndpoint(baseUrl: string | null, token: string | null): void {
+    this.localMediaBaseUrl = baseUrl;
+    this.localMediaToken = token;
+  }
+
+  usesHttpMediaStream(): boolean {
+    return !isTauriRuntime() || Boolean(this.localMediaBaseUrl && this.localMediaToken);
+  }
+
+  hasPendingThumbnailFailed(itemId: string): boolean {
+    return this.failedPendingThumbs.has(itemId);
   }
 
   getVaultMediaStreamUrl(itemId: string): string {
@@ -80,6 +97,11 @@ class ImageMemoryCache {
         ? `&mt=${encodeURIComponent(this.lanMediaToken)}`
         : "";
       return `/api/media/${encodedId}?e=${this.epoch}${mt}`;
+    }
+    if (this.localMediaBaseUrl && this.localMediaToken) {
+      return `${this.localMediaBaseUrl}/media/${encodedId}?t=${encodeURIComponent(
+        this.localMediaToken
+      )}&e=${this.epoch}`;
     }
     const isWindows =
       typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
@@ -152,6 +174,9 @@ class ImageMemoryCache {
   }
 
   processPendingAvifThumbnail(itemId: string): Promise<ItemDetail> {
+    if (this.failedPendingThumbs.has(itemId)) {
+      return Promise.reject(new Error("AVIF thumbnail previously failed"));
+    }
     const existing = this.inflightAvif.get(itemId);
     if (existing) return existing;
 
@@ -191,14 +216,22 @@ class ImageMemoryCache {
           throw new Error("Vault closed");
         }
         const updated = await vaultApi.saveMediaThumbnail(itemId, pngBytes, origW, origH, 0);
+        this.failedPendingThumbs.delete(itemId);
         this.thumbs.delete(itemId);
         return updated;
       } finally {
         bitmap.close();
       }
-    })().finally(() => {
-      this.inflightAvif.delete(itemId);
-    });
+    })()
+      .catch((err) => {
+        if (this.epoch === currentEpoch) {
+          this.failedPendingThumbs.add(itemId);
+        }
+        throw err;
+      })
+      .finally(() => {
+        this.inflightAvif.delete(itemId);
+      });
 
     this.inflightAvif.set(itemId, promise);
     return promise;
@@ -218,8 +251,14 @@ class ImageMemoryCache {
       }
 
       let finished = false;
+      let seekTimer: number | null = null;
       const cleanup = () => {
         window.clearTimeout(timer);
+        if (seekTimer !== null) {
+          window.clearTimeout(seekTimer);
+          seekTimer = null;
+        }
+        video.pause();
         video.onloadeddata = null;
         video.onseeked = null;
         video.onerror = null;
@@ -236,10 +275,14 @@ class ImageMemoryCache {
 
       const timer = window.setTimeout(() => {
         fail(new Error("Video thumbnail timeout"));
-      }, 8000);
+      }, 15_000);
 
       const drawFrame = () => {
         if (finished) return;
+        if (seekTimer !== null) {
+          window.clearTimeout(seekTimer);
+          seekTimer = null;
+        }
         try {
           const origW = video.videoWidth || 320;
           const origH = video.videoHeight || 240;
@@ -282,9 +325,11 @@ class ImageMemoryCache {
 
       video.onerror = () => fail(new Error("Video load error"));
       video.onloadeddata = () => {
+        video.onloadeddata = null;
         const dur = video.duration;
         if (Number.isFinite(dur) && dur > 0.5) {
           video.onseeked = drawFrame;
+          seekTimer = window.setTimeout(drawFrame, 4000);
           try {
             video.currentTime = Math.min(0.5, dur * 0.1);
           } catch {
@@ -300,18 +345,31 @@ class ImageMemoryCache {
   }
 
   processPendingVideoThumbnail(itemId: string, mimeType: string): Promise<ItemDetail> {
+    if (this.failedPendingThumbs.has(itemId)) {
+      return Promise.reject(new Error("Video thumbnail previously failed"));
+    }
     const existing = this.inflightVideo.get(itemId);
     if (existing) return existing;
 
     const currentEpoch = this.epoch;
-    const promise = (async () => {
+    const runTask = async (): Promise<ItemDetail> => {
+      if (this.epoch !== currentEpoch) {
+        throw new Error("Vault closed");
+      }
+
       let frame: { pngBytes: ArrayBuffer; width: number; height: number; durationMs: number };
       try {
         frame = await this.captureVideoFrame(this.getVaultMediaStreamUrl(itemId), true);
-      } catch {
-        // Fallback to temporary in-memory Blob URL only for <=128 MiB videos if canvas readback fails
+      } catch (streamErr) {
+        if (this.epoch !== currentEpoch) {
+          throw new Error("Vault closed");
+        }
+        if (this.usesHttpMediaStream()) {
+          throw streamErr;
+        }
+        // Fallback to temporary in-memory Blob URL only for <=32 MiB videos if canvas readback fails
         const detail = await vaultApi.getItemDetail(itemId);
-        if (detail.byteSize > 128 * 1024 * 1024) {
+        if (detail.byteSize > 32 * 1024 * 1024) {
           throw new Error("Large video thumbnail fallback skipped");
         }
         const bytes = await vaultApi.fetchImageBytes(itemId);
@@ -338,11 +396,27 @@ class ImageMemoryCache {
         frame.height,
         frame.durationMs
       );
+      this.failedPendingThumbs.delete(itemId);
       this.thumbs.delete(itemId);
       return updated;
-    })().finally(() => {
-      this.inflightVideo.delete(itemId);
-    });
+    };
+
+    const queued = this.videoQueueTail.catch(() => {}).then(runTask);
+    this.videoQueueTail = queued.then(
+      () => undefined,
+      () => undefined
+    );
+
+    const promise = queued
+      .catch((err) => {
+        if (this.epoch === currentEpoch) {
+          this.failedPendingThumbs.add(itemId);
+        }
+        throw err;
+      })
+      .finally(() => {
+        this.inflightVideo.delete(itemId);
+      });
 
     this.inflightVideo.set(itemId, promise);
     return promise;
@@ -352,18 +426,23 @@ class ImageMemoryCache {
     for (const id of itemIds) {
       this.thumbs.delete(id);
       this.fulls.delete(id);
+      this.failedPendingThumbs.delete(id);
     }
   }
 
   revokeAll(): void {
     this.epoch += 1;
     this.lanMediaToken = null;
+    this.localMediaBaseUrl = null;
+    this.localMediaToken = null;
     this.thumbs.clear();
     this.fulls.clear();
     this.inflightThumbs.clear();
     this.inflightFulls.clear();
     this.inflightAvif.clear();
     this.inflightVideo.clear();
+    this.failedPendingThumbs.clear();
+    this.videoQueueTail = Promise.resolve();
   }
 }
 

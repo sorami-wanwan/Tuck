@@ -417,6 +417,8 @@ async fn test_lan_server_auth_security_rbac_streaming_and_lock() {
     assert_eq!(v_status_json["urlImportSettings"]["ffmpegPath"], "");
     assert_eq!(v_status_json["urlImportSettings"]["cookiesFile"], "");
     assert_eq!(v_status_json["urlImportSettings"]["cookieBrowser"], "");
+    assert!(v_status_json.get("localMediaBaseUrl").is_none());
+    assert!(v_status_json.get("localMediaToken").is_none());
 
     // 6. QR token login -> cookie + mediaToken
     let qr_token = rotated.qr_url.split("?k=").nth(1).unwrap();

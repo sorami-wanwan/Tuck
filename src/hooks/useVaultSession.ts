@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject, type SetStateAction } from "react";
 import { imageMemoryCache } from "../services/imageCache";
 import {
   connectLanEventStream,
@@ -101,7 +101,40 @@ export function useVaultSession({
 
   const canEdit = !isWebClient || lanMode === "readWrite";
 
-  const [status, setStatus] = useState<VaultStatus>(CLOSED_STATUS);
+  const [status, setRawStatus] = useState<VaultStatus>(CLOSED_STATUS);
+
+  const setStatus = useCallback(
+    (nextOrUpdater: SetStateAction<VaultStatus>) => {
+      if (typeof nextOrUpdater !== "function" && !isWebClient) {
+        imageMemoryCache.setLocalMediaEndpoint(
+          nextOrUpdater.localMediaBaseUrl ?? null,
+          nextOrUpdater.localMediaToken ?? null
+        );
+      }
+      setRawStatus((prev) => {
+        const next = typeof nextOrUpdater === "function" ? nextOrUpdater(prev) : nextOrUpdater;
+        if (!isWebClient) {
+          imageMemoryCache.setLocalMediaEndpoint(
+            next.localMediaBaseUrl ?? null,
+            next.localMediaToken ?? null
+          );
+        }
+        return next;
+      });
+    },
+    [isWebClient]
+  );
+
+  if (!isWebClient) {
+    if (status.isOpen) {
+      imageMemoryCache.setLocalMediaEndpoint(
+        status.localMediaBaseUrl ?? null,
+        status.localMediaToken ?? null
+      );
+    } else {
+      imageMemoryCache.setLocalMediaEndpoint(null, null);
+    }
+  }
 
   const libraryRefreshTimerRef = useRef<number | null>(null);
   const lastActivityRef = useRef(Date.now());

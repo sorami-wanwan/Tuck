@@ -95,6 +95,10 @@ pub struct VaultStatus {
     pub skip_plain_export_confirm: bool,
     pub lock_settings: LockSettings,
     pub url_import_settings: UrlImportSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_media_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_media_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -151,6 +151,26 @@ export function App() {
   refreshLibraryRef.current = refreshLibrary;
   const triggerRefreshLibrary = useCallback(() => refreshLibraryRef.current(), []);
 
+  const pendingThumbRefreshTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pendingThumbRefreshTimerRef.current !== null) {
+        window.clearTimeout(pendingThumbRefreshTimerRef.current);
+        pendingThumbRefreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handlePendingThumbCompleted = useCallback(() => {
+    if (pendingThumbRefreshTimerRef.current !== null) {
+      window.clearTimeout(pendingThumbRefreshTimerRef.current);
+    }
+    pendingThumbRefreshTimerRef.current = window.setTimeout(() => {
+      pendingThumbRefreshTimerRef.current = null;
+      void refreshLibraryRef.current();
+    }, 250);
+  }, []);
+
   const handleOpenExportPackageForEntries = useCallback((selectedEntries: EntryRef[]) => {
     setMaintenanceModal({
       open: true,
@@ -259,6 +279,10 @@ export function App() {
   });
 
   resetWorkspaceRef.current = () => {
+    if (pendingThumbRefreshTimerRef.current !== null) {
+      window.clearTimeout(pendingThumbRefreshTimerRef.current);
+      pendingThumbRefreshTimerRef.current = null;
+    }
     setEntries([]);
     setFolders([]);
     setTags([]);
@@ -651,7 +675,7 @@ export function App() {
               );
             }}
             onImportFiles={() => void importFlow.handleImportFiles()}
-            onAvifCompleted={() => void refreshLibrary()}
+            onAvifCompleted={handlePendingThumbCompleted}
             onCreateGroupFromSelection={() => void gallery.handleCreateGroupFromSelection()}
             onRemoveSelectionFromFolder={() => {
               if (!currentFolderId || gallery.selectedEntryRefs.length === 0) return;

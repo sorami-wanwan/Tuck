@@ -1,10 +1,19 @@
+use std::io;
+
+use axum::body::Body;
+use axum::http::{header as axum_header, StatusCode as AxumStatusCode};
+use axum::response::Response as AxumResponse;
+use bytes::Bytes;
+use futures_util::stream::unfold;
 use tauri::http::StatusCode;
+use tokio::sync::mpsc;
 
 use crate::error::VaultError;
 use crate::state::AppState;
 
 pub const MAX_STREAM_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const INLINE_CHUNKED_THRESHOLD: usize = 64 * 1024 * 1024;
+const HTTP_SUBCHUNK_BYTES: usize = 256 * 1024;
 
 pub struct MediaStreamSlice {
     pub status: StatusCode,
@@ -14,7 +23,11 @@ pub struct MediaStreamSlice {
     pub body: Vec<u8>,
 }
 
-pub(crate) fn parse_byte_range(range_header: &str, total: usize) -> Option<(usize, usize)> {
+fn parse_byte_range_with_cap(
+    range_header: &str,
+    total: usize,
+    open_end_cap: Option<usize>,
+) -> Option<(usize, usize)> {
     if total == 0 {
         return None;
     }
@@ -40,9 +53,10 @@ pub(crate) fn parse_byte_range(range_header: &str, total: usize) -> Option<(usiz
     }
 
     let end = if end_str.is_empty() {
-        start
-            .saturating_add(MAX_STREAM_CHUNK_BYTES.saturating_sub(1))
-            .min(total - 1)
+        match open_end_cap {
+            Some(cap) => start.saturating_add(cap.saturating_sub(1)).min(total - 1),
+            None => total - 1,
+        }
     } else {
         let requested_end: usize = end_str.trim().parse().ok()?;
         if requested_end < start {
@@ -52,6 +66,171 @@ pub(crate) fn parse_byte_range(range_header: &str, total: usize) -> Option<(usiz
     };
 
     Some((start, end))
+}
+
+pub(crate) fn parse_byte_range(range_header: &str, total: usize) -> Option<(usize, usize)> {
+    parse_byte_range_with_cap(range_header, total, Some(MAX_STREAM_CHUNK_BYTES))
+}
+
+pub(crate) fn parse_http_byte_range(range_header: &str, total: usize) -> Option<(usize, usize)> {
+    parse_byte_range_with_cap(range_header, total, None)
+}
+
+fn stream_media_range_to_channel(
+    state: &AppState,
+    item_id: &str,
+    start: usize,
+    end: usize,
+    chunk_size: usize,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+) {
+    if start > end {
+        return;
+    }
+
+    if chunk_size == 0 {
+        let (_, bytes) = match state.get_or_load_media(item_id) {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(io::Error::other(e.to_string())));
+                return;
+            }
+        };
+        if start >= bytes.len() {
+            return;
+        }
+        let clamped_end = end.min(bytes.len() - 1);
+        for sub in bytes[start..=clamped_end].chunks(HTTP_SUBCHUNK_BYTES) {
+            if !state.is_open() {
+                let _ = tx.blocking_send(Err(io::Error::other("vault closed")));
+                return;
+            }
+            if tx.blocking_send(Ok(Bytes::copy_from_slice(sub))).is_err() {
+                return;
+            }
+        }
+        return;
+    }
+
+    let first_chunk = start / chunk_size;
+    let last_chunk = end / chunk_size;
+    for chunk_idx in first_chunk..=last_chunk {
+        if !state.is_open() {
+            let _ = tx.blocking_send(Err(io::Error::other("vault closed")));
+            return;
+        }
+        let data = match state.read_blob_chunk(item_id, chunk_idx as i64) {
+            Ok(Some(d)) => d,
+            Ok(None) => break,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(io::Error::other(e.to_string())));
+                return;
+            }
+        };
+        let chunk_start = chunk_idx.saturating_mul(chunk_size);
+        let local_start = start.saturating_sub(chunk_start);
+        let local_end_excl = end
+            .saturating_add(1)
+            .saturating_sub(chunk_start)
+            .min(data.len());
+        if local_start < local_end_excl {
+            for sub in data[local_start..local_end_excl].chunks(HTTP_SUBCHUNK_BYTES) {
+                if !state.is_open() {
+                    let _ = tx.blocking_send(Err(io::Error::other("vault closed")));
+                    return;
+                }
+                if tx.blocking_send(Ok(Bytes::copy_from_slice(sub))).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+pub async fn build_http_media_response(
+    state: AppState,
+    item_id: String,
+    is_head: bool,
+    range_header: Option<String>,
+) -> Result<AxumResponse, VaultError> {
+    let state_info = state.clone();
+    let id_info = item_id.clone();
+    let (mime_type, total, chunk_size) =
+        tokio::task::spawn_blocking(move || state_info.get_media_info(&id_info))
+            .await
+            .map_err(|e| VaultError::Io(io::Error::other(e.to_string())))??;
+
+    if total == 0 {
+        if range_header.is_some() {
+            return AxumResponse::builder()
+                .status(AxumStatusCode::RANGE_NOT_SATISFIABLE)
+                .header(axum_header::ACCEPT_RANGES, "bytes")
+                .header(axum_header::CONTENT_RANGE, "bytes */0")
+                .header(axum_header::CACHE_CONTROL, "no-store")
+                .header(axum_header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .body(Body::empty())
+                .map_err(|e| VaultError::Io(io::Error::other(e.to_string())));
+        }
+        return AxumResponse::builder()
+            .status(AxumStatusCode::OK)
+            .header(axum_header::CONTENT_TYPE, mime_type)
+            .header(axum_header::ACCEPT_RANGES, "bytes")
+            .header(axum_header::CONTENT_LENGTH, "0")
+            .header(axum_header::CACHE_CONTROL, "no-store")
+            .header(axum_header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(Body::empty())
+            .map_err(|e| VaultError::Io(io::Error::other(e.to_string())));
+    }
+
+    let (status, start, end, content_range) = if let Some(rh) = range_header.as_deref() {
+        let Some((s, e)) = parse_http_byte_range(rh, total) else {
+            return AxumResponse::builder()
+                .status(AxumStatusCode::RANGE_NOT_SATISFIABLE)
+                .header(axum_header::ACCEPT_RANGES, "bytes")
+                .header(axum_header::CONTENT_RANGE, format!("bytes */{total}"))
+                .header(axum_header::CACHE_CONTROL, "no-store")
+                .header(axum_header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .body(Body::empty())
+                .map_err(|e| VaultError::Io(io::Error::other(e.to_string())));
+        };
+        (
+            AxumStatusCode::PARTIAL_CONTENT,
+            s,
+            e,
+            Some(format!("bytes {s}-{e}/{total}")),
+        )
+    } else {
+        (AxumStatusCode::OK, 0, total - 1, None)
+    };
+
+    let content_length = end.saturating_sub(start).saturating_add(1);
+    let mut builder = AxumResponse::builder()
+        .status(status)
+        .header(axum_header::CONTENT_TYPE, mime_type)
+        .header(axum_header::ACCEPT_RANGES, "bytes")
+        .header(axum_header::CONTENT_LENGTH, content_length.to_string())
+        .header(axum_header::CACHE_CONTROL, "no-store")
+        .header(axum_header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if let Some(cr) = content_range {
+        builder = builder.header(axum_header::CONTENT_RANGE, cr);
+    }
+
+    if is_head {
+        return builder
+            .body(Body::empty())
+            .map_err(|e| VaultError::Io(io::Error::other(e.to_string())));
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(2);
+    tokio::task::spawn_blocking(move || {
+        stream_media_range_to_channel(&state, &item_id, start, end, chunk_size, tx);
+    });
+    let stream = unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    builder
+        .body(Body::from_stream(stream))
+        .map_err(|e| VaultError::Io(io::Error::other(e.to_string())))
 }
 
 pub fn resolve_media_slice(
@@ -200,6 +379,28 @@ mod tests {
         assert_eq!(parse_byte_range("bytes=200-100", total), None);
         assert_eq!(parse_byte_range("bytes=-0", total), None);
         assert_eq!(parse_byte_range("bytes=0-0", 0), None);
+    }
+
+    #[test]
+    fn test_parse_http_byte_range() {
+        let total = 10_000_000usize;
+        assert_eq!(parse_http_byte_range("bytes=0-99", total), Some((0, 99)));
+        assert_eq!(
+            parse_http_byte_range("bytes=0-", total),
+            Some((0, total - 1))
+        );
+        assert_eq!(
+            parse_http_byte_range("bytes=4096-", total),
+            Some((4096, total - 1))
+        );
+        assert_eq!(
+            parse_http_byte_range("bytes=-500", total),
+            Some((total - 500, total - 1))
+        );
+        assert_eq!(parse_http_byte_range("bytes=10000000-", total), None);
+        assert_eq!(parse_http_byte_range("bytes=200-100", total), None);
+        assert_eq!(parse_http_byte_range("bytes=-0", total), None);
+        assert_eq!(parse_http_byte_range("bytes=0-0", 0), None);
     }
 
     #[test]

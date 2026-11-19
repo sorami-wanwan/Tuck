@@ -360,6 +360,21 @@ impl VaultDb {
         ))
     }
 
+    pub fn read_blob_chunk(
+        &self,
+        item_id: &str,
+        chunk_index: i64,
+    ) -> Result<Option<Vec<u8>>, VaultError> {
+        self.conn
+            .query_row(
+                "SELECT data FROM blob_chunks WHERE item_id = ?1 AND chunk_index = ?2",
+                params![item_id, chunk_index],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(VaultError::from)
+    }
+
     pub fn read_media_range(
         &self,
         item_id: &str,

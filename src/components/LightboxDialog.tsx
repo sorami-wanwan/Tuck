@@ -85,6 +85,7 @@ export function LightboxDialog({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [imageUrl, setImageUrl] = useState<string | undefined>(undefined);
   const [videoUrl, setVideoUrl] = useState<string | undefined>(undefined);
+  const [videoError, setVideoError] = useState(false);
   const [videoFallbackBlobUrl, setVideoFallbackBlobUrl] = useState<string | null>(null);
   const [videoLoop, setVideoLoop] = useState(false);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
@@ -128,6 +129,7 @@ export function LightboxDialog({
   }, [videoFallbackBlobUrl]);
 
   useEffect(() => {
+    setVideoError(false);
     if (!open || !currentItem) {
       setImageUrl(undefined);
       setVideoUrl(undefined);
@@ -170,6 +172,17 @@ export function LightboxDialog({
       active = false;
     };
   }, [open, currentItem?.id, currentItem?.coverMimeType, prevItem?.id, nextItem?.id]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    return () => {
+      if (v) {
+        v.pause();
+        v.removeAttribute("src");
+        v.load();
+      }
+    };
+  }, [open, currentItem?.id]);
 
   const layoutScale = naturalSize
     ? Math.min(1, MAX_LAYOUT_EDGE / Math.max(naturalSize.width, naturalSize.height, 1))
@@ -390,7 +403,11 @@ export function LightboxDialog({
           {...(isVideo ? {} : physics.handlers)}
         >
           {isVideo && currentItem ? (
-            videoUrl ? (
+            videoError ? (
+              <div className="video-thumb-placeholder" style={{ padding: 24 }}>
+                <span>この動画を再生できませんでした</span>
+              </div>
+            ) : videoUrl ? (
               <video
                 ref={videoRef}
                 key={currentItem.id}
@@ -404,7 +421,11 @@ export function LightboxDialog({
                 height={currentItem.height > 0 ? currentItem.height : undefined}
                 className="lightbox-video"
                 onError={() => {
-                  if (!videoUrl.startsWith("blob:") && currentItem.byteSize <= 128 * 1024 * 1024) {
+                  if (
+                    !imageMemoryCache.usesHttpMediaStream() &&
+                    !videoUrl.startsWith("blob:") &&
+                    currentItem.byteSize <= 32 * 1024 * 1024
+                  ) {
                     const targetId = currentItem.id;
                     const targetMime = currentItem.coverMimeType;
                     void imageMemoryCache
@@ -412,8 +433,12 @@ export function LightboxDialog({
                       .then((blobUrl) => {
                         setVideoUrl(blobUrl);
                       })
-                      .catch(() => {});
+                      .catch(() => {
+                        setVideoError(true);
+                      });
+                    return;
                   }
+                  setVideoError(true);
                 }}
               />
             ) : (

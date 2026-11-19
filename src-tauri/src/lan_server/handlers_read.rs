@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::error::VaultError;
-use crate::media_stream::resolve_media_slice;
+use crate::media_stream::build_http_media_response;
 use crate::models::{
     EntryKind, EntryRef, SearchQuery, VaultStatus, WebBatchExportRequest,
     WebBatchExportTicketResponse,
@@ -84,6 +84,8 @@ fn sanitize_vault_status(mut status: VaultStatus) -> VaultStatus {
     status.url_import_settings.ffmpeg_path.clear();
     status.url_import_settings.cookie_browser.clear();
     status.url_import_settings.cookies_file.clear();
+    status.local_media_base_url = None;
+    status.local_media_token = None;
     status
 }
 
@@ -199,32 +201,8 @@ async fn serve_media_inner(
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let state_clone = runtime.app_state.clone();
 
-    let slice = tokio::task::spawn_blocking(move || {
-        resolve_media_slice(&state_clone, &id, is_head, range_header.as_deref())
-    })
-    .await
-    .map_err(|e| error_response(VaultError::LanShare(e.to_string())))?
-    .map_err(error_response)?;
-
-    let status = StatusCode::from_u16(slice.status.as_u16()).unwrap_or(StatusCode::OK);
-    let mut builder = Response::builder()
-        .status(status)
-        .header(header::ACCEPT_RANGES, "bytes");
-
-    if status != StatusCode::RANGE_NOT_SATISFIABLE {
-        builder = builder
-            .header(header::CONTENT_TYPE, slice.mime_type)
-            .header(header::CONTENT_LENGTH, slice.content_length.to_string());
-    }
-    if let Some(cr) = slice.content_range {
-        builder = builder.header(header::CONTENT_RANGE, cr);
-    }
-
-    builder
-        .body(Body::from(slice.body))
-        .map_err(|e| LanApiError::from(VaultError::LanShare(e.to_string())))
+    Ok(build_http_media_response(runtime.app_state.clone(), id, is_head, range_header).await?)
 }
 
 pub(super) async fn handle_get_media(

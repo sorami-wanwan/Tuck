@@ -124,6 +124,8 @@ function ThumbCard({
     imageMemoryCache.getCachedThumbnailUrl(coverId)
   );
   const [failed, setFailed] = useState(false);
+  const onAvifCompletedRef = useRef(onAvifCompleted);
+  onAvifCompletedRef.current = onAvifCompleted;
 
   useEffect(() => {
     let active = true;
@@ -138,12 +140,19 @@ function ThumbCard({
     const load = async () => {
       try {
         if (!entry.coverHasThumbnail) {
+          if (
+            (entry.coverMimeType === "image/avif" || isVideoMime(entry.coverMimeType)) &&
+            imageMemoryCache.hasPendingThumbnailFailed(coverId)
+          ) {
+            if (active) setFailed(true);
+            return;
+          }
           if (entry.coverMimeType === "image/avif") {
             await imageMemoryCache.processPendingAvifThumbnail(coverId);
-            if (active) onAvifCompleted();
+            if (active) onAvifCompletedRef.current();
           } else if (isVideoMime(entry.coverMimeType)) {
             await imageMemoryCache.processPendingVideoThumbnail(coverId, entry.coverMimeType);
-            if (active) onAvifCompleted();
+            if (active) onAvifCompletedRef.current();
           }
         }
         const nextUrl = await imageMemoryCache.getThumbnailUrl(coverId);
@@ -157,7 +166,7 @@ function ThumbCard({
     return () => {
       active = false;
     };
-  }, [coverId, entry.coverHasThumbnail, entry.coverMimeType, onAvifCompleted]);
+  }, [coverId, entry.coverHasThumbnail, entry.coverMimeType]);
 
   const isVideo = entry.kind === "image" && isVideoMime(entry.coverMimeType);
   const durationLabel = isVideo ? formatDurationMs(entry.durationMs) : "";

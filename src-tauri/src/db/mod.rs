@@ -470,6 +470,8 @@ impl VaultDb {
             skip_plain_export_confirm: self.get_skip_plain_export_confirm(),
             lock_settings: self.get_lock_settings(),
             url_import_settings: self.get_url_import_settings(),
+            local_media_base_url: None,
+            local_media_token: None,
         })
     }
 }
