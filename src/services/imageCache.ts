@@ -5,6 +5,31 @@ import { vaultApi } from "./vaultApi";
 const THUMB_CACHE_LIMIT = 500;
 const FULL_CACHE_LIMIT = 12;
 const THUMB_MAX_EDGE = 400;
+const MAX_CONCURRENT_AVIF = 3;
+
+function computeSmartThumbnailRect(
+  origW: number,
+  origH: number
+): { sx: number; sy: number; sw: number; sh: number; tw: number; th: number } {
+  let sx = 0;
+  let sy = 0;
+  let sw = Math.max(1, origW);
+  let sh = Math.max(1, origH);
+
+  if (origH > origW * 3) {
+    // Tall webtoon strip: top-aligned 1:3 crop
+    sh = Math.min(origH, Math.max(1, origW * 3));
+  } else if (origW > origH * 3) {
+    // Wide panorama: center 1:3 crop
+    sw = Math.min(origW, Math.max(1, origH * 3));
+    sx = Math.floor((origW - sw) / 2);
+  }
+
+  const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(sw, sh, 1));
+  const tw = Math.max(1, Math.round(sw * scale));
+  const th = Math.max(1, Math.round(sh * scale));
+  return { sx, sy, sw, sh, tw, th };
+}
 
 type FrameQualityKind = "good" | "flat" | "noise" | "blank";
 
@@ -191,6 +216,10 @@ function analyzeCanvasFrame(
 }
 
 function buildCandidateTimestampsSec(durationSec: number): number[] {
+  if (durationSec === Infinity) {
+    // Duration-less WebM/stream: still try non-zero timestamps before falling back to 0s
+    return [0.25, 1.0, 0.0];
+  }
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
     return [0];
   }
@@ -335,12 +364,15 @@ class ImageMemoryCache {
   private readonly fulls = new LruUrlCache(FULL_CACHE_LIMIT);
   private readonly inflightThumbs = new Map<string, Promise<string>>();
   private readonly inflightFulls = new Map<string, Promise<string>>();
-  private readonly inflightAvif = new Map<string, Promise<ItemDetail>>();
-  private readonly inflightVideo = new Map<string, Promise<ItemDetail>>();
+  private readonly inflightDisplay = new Map<string, Promise<string>>();
+  private readonly inflightAvif = new Map<string, Promise<ItemDetail | null>>();
+  private readonly inflightVideo = new Map<string, Promise<ItemDetail | null>>();
   private readonly failedPendingThumbs = new Set<string>();
   private readonly thumbVersions = new Map<string, number>();
   private readonly thumbListeners = new Map<string, Set<() => void>>();
   private readonly knownHasThumb = new Set<string>();
+  private avifActiveCount = 0;
+  private avifWaiters: Array<() => void> = [];
   private videoQueueTail: Promise<void> = Promise.resolve();
   private epoch = 0;
   private lanMediaToken: string | null = null;
@@ -389,23 +421,58 @@ class ImageMemoryCache {
     };
   }
 
+  private emitThumbnailListeners(itemId: string): void {
+    this.thumbVersions.set(itemId, (this.thumbVersions.get(itemId) ?? 0) + 1);
+    const listeners = this.thumbListeners.get(itemId);
+    if (listeners) {
+      for (const fn of Array.from(listeners)) {
+        try {
+          fn();
+        } catch {
+          // ignore listener errors
+        }
+      }
+    }
+  }
+
+  private cacheLocalThumbnail(itemId: string, bytes: ArrayBuffer, mimeType: string): void {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+    this.failedPendingThumbs.delete(itemId);
+    this.knownHasThumb.add(itemId);
+    this.thumbs.set(itemId, url);
+    this.inflightThumbs.delete(itemId);
+    this.emitThumbnailListeners(itemId);
+  }
+
+  private async withAvifSlot<T>(epoch: number, fn: () => Promise<T>): Promise<T> {
+    while (this.avifActiveCount >= MAX_CONCURRENT_AVIF) {
+      if (this.epoch !== epoch) {
+        throw new Error("Vault closed");
+      }
+      await new Promise<void>((resolve) => {
+        this.avifWaiters.push(resolve);
+      });
+    }
+    if (this.epoch !== epoch) {
+      throw new Error("Vault closed");
+    }
+    this.avifActiveCount += 1;
+    try {
+      return await fn();
+    } finally {
+      this.avifActiveCount = Math.max(0, this.avifActiveCount - 1);
+      const next = this.avifWaiters.shift();
+      next?.();
+    }
+  }
+
   notifyThumbnailsUpdated(itemIds: string[]): void {
     for (const id of itemIds) {
       this.failedPendingThumbs.delete(id);
       this.knownHasThumb.add(id);
       this.thumbs.delete(id);
       this.inflightThumbs.delete(id);
-      this.thumbVersions.set(id, (this.thumbVersions.get(id) ?? 0) + 1);
-      const listeners = this.thumbListeners.get(id);
-      if (listeners) {
-        for (const fn of Array.from(listeners)) {
-          try {
-            fn();
-          } catch {
-            // ignore listener errors
-          }
-        }
-      }
+      this.emitThumbnailListeners(id);
     }
   }
 
@@ -471,13 +538,18 @@ class ImageMemoryCache {
     if (pending) return pending;
 
     const currentEpoch = this.epoch;
-    const promise = vaultApi
-      .fetchImageBytes(itemId)
+    const isTiff = mimeType === "image/tiff";
+    const fetchPromise = isTiff
+      ? vaultApi.fetchDisplayImageBytes(itemId)
+      : vaultApi.fetchImageBytes(itemId);
+    const blobMime = isTiff ? "image/webp" : mimeType;
+
+    const promise = fetchPromise
       .then((buf) => {
         if (this.epoch !== currentEpoch) {
           throw new Error("Vault closed");
         }
-        const blob = new Blob([buf], { type: mimeType });
+        const blob = new Blob([buf], { type: blobMime });
         const url = URL.createObjectURL(blob);
         this.fulls.set(itemId, url);
         return url;
@@ -492,6 +564,34 @@ class ImageMemoryCache {
     return promise;
   }
 
+  getDisplayFallbackUrl(itemId: string, mimeType: string): Promise<string> {
+    if (mimeType === "image/avif" || mimeType.startsWith("video/")) {
+      return Promise.reject(new Error("Display conversion unsupported"));
+    }
+    const pending = this.inflightDisplay.get(itemId);
+    if (pending) return pending;
+
+    const currentEpoch = this.epoch;
+    const promise = vaultApi
+      .fetchDisplayImageBytes(itemId)
+      .then((buf) => {
+        if (this.epoch !== currentEpoch) {
+          throw new Error("Vault closed");
+        }
+        const url = URL.createObjectURL(new Blob([buf], { type: "image/webp" }));
+        this.fulls.set(itemId, url);
+        return url;
+      })
+      .finally(() => {
+        if (this.inflightDisplay.get(itemId) === promise) {
+          this.inflightDisplay.delete(itemId);
+        }
+      });
+
+    this.inflightDisplay.set(itemId, promise);
+    return promise;
+  }
+
   prefetchFullImage(itemId: string, mimeType: string): void {
     if (this.fulls.get(itemId) || this.inflightFulls.has(itemId)) return;
     void this.getFullImageUrl(itemId, mimeType).catch(() => {});
@@ -499,8 +599,9 @@ class ImageMemoryCache {
 
   processPendingAvifThumbnail(
     itemId: string,
-    options?: { force?: boolean }
-  ): Promise<ItemDetail> {
+    options?: { force?: boolean; persist?: boolean }
+  ): Promise<ItemDetail | null> {
+    const persist = options?.persist ?? true;
     if (options?.force) {
       this.failedPendingThumbs.delete(itemId);
     } else if (this.failedPendingThumbs.has(itemId)) {
@@ -511,7 +612,7 @@ class ImageMemoryCache {
     if (existing) return existing;
 
     const currentEpoch = this.epoch;
-    const promise = (async () => {
+    const promise = this.withAvifSlot(currentEpoch, async () => {
       const avifBytes = await vaultApi.fetchImageBytes(itemId);
       if (this.epoch !== currentEpoch) {
         throw new Error("Vault closed");
@@ -522,9 +623,7 @@ class ImageMemoryCache {
       try {
         const origW = bitmap.width;
         const origH = bitmap.height;
-        const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
-        const tw = Math.max(1, Math.round(origW * scale));
-        const th = Math.max(1, Math.round(origH * scale));
+        const { sx, sy, sw, sh, tw, th } = computeSmartThumbnailRect(origW, origH);
 
         const canvas = document.createElement("canvas");
         canvas.width = tw;
@@ -533,11 +632,15 @@ class ImageMemoryCache {
         if (!ctx) {
           throw new Error("Canvas context unavailable");
         }
-        ctx.drawImage(bitmap, 0, 0, tw, th);
+        ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, tw, th);
 
         const pngBytes = await canvasToPngBuffer(canvas);
         if (this.epoch !== currentEpoch) {
           throw new Error("Vault closed");
+        }
+        if (!persist) {
+          this.cacheLocalThumbnail(itemId, pngBytes, "image/png");
+          return null;
         }
         const updated = await vaultApi.saveMediaThumbnail(itemId, pngBytes, origW, origH, 0);
         this.notifyThumbnailsUpdated([itemId]);
@@ -545,7 +648,7 @@ class ImageMemoryCache {
       } finally {
         bitmap.close();
       }
-    })()
+    })
       .catch((err) => {
         if (this.epoch === currentEpoch && !options?.force) {
           this.failedPendingThumbs.add(itemId);
@@ -670,9 +773,7 @@ class ImageMemoryCache {
           Number.isFinite(video.duration) && video.duration > 0
             ? Math.round(video.duration * 1000)
             : 0;
-        const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
-        const tw = Math.max(1, Math.round(origW * scale));
-        const th = Math.max(1, Math.round(origH * scale));
+        const { sx, sy, sw, sh, tw, th } = computeSmartThumbnailRect(origW, origH);
 
         const canvas = document.createElement("canvas");
         canvas.width = tw;
@@ -682,7 +783,7 @@ class ImageMemoryCache {
           throw new Error("Canvas context unavailable");
         }
         ctx.clearRect(0, 0, tw, th);
-        ctx.drawImage(video, 0, 0, tw, th);
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, tw, th);
         const quality = analyzeCanvasFrame(ctx, tw, th);
         if (quality.kind === "blank" || quality.kind === "noise") {
           return { quality };
@@ -701,7 +802,12 @@ class ImageMemoryCache {
         }
 
         const dur = video.duration;
-        const maxTs = Number.isFinite(dur) && dur > 0 ? Math.max(0, dur - 0.1) : 0;
+        const maxTs =
+          Number.isFinite(dur) && dur > 0
+            ? Math.max(0, dur - 0.1)
+            : dur === Infinity
+              ? Number.MAX_SAFE_INTEGER
+              : 0;
 
         if (explicitTimestampMs !== undefined) {
           const targetSec = Math.min(maxTs, Math.max(0, explicitTimestampMs / 1000));
@@ -820,8 +926,9 @@ class ImageMemoryCache {
   processPendingVideoThumbnail(
     itemId: string,
     mimeType: string,
-    options?: { force?: boolean; timestampMs?: number }
-  ): Promise<ItemDetail> {
+    options?: { force?: boolean; timestampMs?: number; persist?: boolean }
+  ): Promise<ItemDetail | null> {
+    const persist = options?.persist ?? true;
     const isManualOrForce = Boolean(options?.force || options?.timestampMs !== undefined);
     if (isManualOrForce) {
       this.failedPendingThumbs.delete(itemId);
@@ -835,21 +942,23 @@ class ImageMemoryCache {
     }
 
     const currentEpoch = this.epoch;
-    const runTask = async (): Promise<ItemDetail> => {
+    const runTask = async (): Promise<ItemDetail | null> => {
       if (this.epoch !== currentEpoch) {
         throw new Error("Vault closed");
       }
 
-      const hostRes = await vaultApi.regenerateItemThumbnail(
-        itemId,
-        options?.timestampMs ?? null
-      );
-      if (this.epoch !== currentEpoch) {
-        throw new Error("Vault closed");
-      }
-      if (hostRes.status === "updated" && hostRes.detail) {
-        this.notifyThumbnailsUpdated([itemId]);
-        return hostRes.detail;
+      if (persist) {
+        const hostRes = await vaultApi.regenerateItemThumbnail(
+          itemId,
+          options?.timestampMs ?? null
+        );
+        if (this.epoch !== currentEpoch) {
+          throw new Error("Vault closed");
+        }
+        if (hostRes.status === "updated" && hostRes.detail) {
+          this.notifyThumbnailsUpdated([itemId]);
+          return hostRes.detail;
+        }
       }
 
       let frame: CapturedFrame;
@@ -886,6 +995,11 @@ class ImageMemoryCache {
 
       if (this.epoch !== currentEpoch) {
         throw new Error("Vault closed");
+      }
+
+      if (!persist) {
+        this.cacheLocalThumbnail(itemId, frame.pngBytes, "image/png");
+        return null;
       }
 
       const updated = await vaultApi.saveMediaThumbnail(
@@ -930,13 +1044,21 @@ class ImageMemoryCache {
     timestampMs?: number
   ): Promise<ItemDetail> {
     if (mimeType.startsWith("video/")) {
-      return this.processPendingVideoThumbnail(itemId, mimeType, {
+      const updated = await this.processPendingVideoThumbnail(itemId, mimeType, {
         force: true,
         timestampMs,
+        persist: true,
       });
+      if (!updated) throw new Error("サムネイルの再生成に失敗しました");
+      return updated;
     }
     if (mimeType === "image/avif") {
-      return this.processPendingAvifThumbnail(itemId, { force: true });
+      const updated = await this.processPendingAvifThumbnail(itemId, {
+        force: true,
+        persist: true,
+      });
+      if (!updated) throw new Error("サムネイルの再生成に失敗しました");
+      return updated;
     }
     const res = await vaultApi.regenerateItemThumbnail(itemId, null);
     if (res.status === "updated" && res.detail) {
@@ -970,9 +1092,7 @@ class ImageMemoryCache {
       Number.isFinite(videoEl.duration) && videoEl.duration > 0
         ? Math.round(videoEl.duration * 1000)
         : 0;
-    const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(origW, origH, 1));
-    const tw = Math.max(1, Math.round(origW * scale));
-    const th = Math.max(1, Math.round(origH * scale));
+    const { sx, sy, sw, sh, tw, th } = computeSmartThumbnailRect(origW, origH);
 
     const canvas = document.createElement("canvas");
     canvas.width = tw;
@@ -981,7 +1101,7 @@ class ImageMemoryCache {
     if (!ctx) {
       throw new Error("Canvas context unavailable");
     }
-    ctx.drawImage(videoEl, 0, 0, tw, th);
+    ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, tw, th);
     const quality = analyzeCanvasFrame(ctx, tw, th);
     if (quality.kind === "blank") {
       throw new Error("動画フレームを取得できませんでした");
@@ -1012,6 +1132,7 @@ class ImageMemoryCache {
       this.thumbs.delete(id);
       this.fulls.delete(id);
       this.inflightThumbs.delete(id);
+      this.inflightDisplay.delete(id);
       this.failedPendingThumbs.delete(id);
       this.knownHasThumb.delete(id);
     }
@@ -1026,11 +1147,15 @@ class ImageMemoryCache {
     this.fulls.clear();
     this.inflightThumbs.clear();
     this.inflightFulls.clear();
+    this.inflightDisplay.clear();
     this.inflightAvif.clear();
     this.inflightVideo.clear();
     this.failedPendingThumbs.clear();
     this.thumbVersions.clear();
     this.knownHasThumb.clear();
+    for (const wake of this.avifWaiters.splice(0)) {
+      wake();
+    }
     this.videoQueueTail = Promise.resolve();
   }
 }

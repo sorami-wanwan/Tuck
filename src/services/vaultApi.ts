@@ -376,6 +376,13 @@ export const vaultApi = {
     return webArrayBuffer(`/api/images/${encodeURIComponent(itemId)}`);
   },
 
+  fetchDisplayImageBytes(itemId: string): Promise<ArrayBuffer> {
+    if (isTauriRuntime()) {
+      return invoke("get_display_image", { itemId });
+    }
+    return webArrayBuffer(`/api/images/${encodeURIComponent(itemId)}/display`);
+  },
+
   setItemTitle(itemId: string, title: string): Promise<ItemDetail> {
     if (isTauriRuntime()) {
       return invoke("set_item_title", { itemId, title });

@@ -16,6 +16,14 @@ function mimeToExt(mime: string): string {
       return "gif";
     case "image/avif":
       return "avif";
+    case "image/bmp":
+    case "image/x-ms-bmp":
+      return "bmp";
+    case "image/tiff":
+      return "tiff";
+    case "image/x-icon":
+    case "image/vnd.microsoft.icon":
+      return "ico";
     case "video/mp4":
       return "mp4";
     case "video/webm":
@@ -49,6 +57,9 @@ function buildDefaultItemFileName(title: string, itemId: string, mimeType: strin
     "image/webp": [".webp"],
     "image/gif": [".gif"],
     "image/avif": [".avif"],
+    "image/bmp": [".bmp", ".dib"],
+    "image/tiff": [".tiff", ".tif"],
+    "image/x-icon": [".ico"],
     "video/mp4": [".mp4", ".m4v"],
     "video/webm": [".webm"],
     "video/quicktime": [".mov", ".qt"],

@@ -3,12 +3,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use image::ImageFormat;
-
 use crate::error::VaultError;
 use crate::imaging::{
-    encode_webp_thumbnail_with_quality, is_video_mime, FrameQuality, FrameQualityKind,
-    GeneratedThumbnail,
+    decode_bounded_png_frame, encode_webp_thumbnail_with_quality, is_video_mime, FrameQuality,
+    FrameQualityKind, GeneratedThumbnail,
 };
 use crate::models::RegenerateThumbnailResult;
 use crate::state::AppState;
@@ -192,7 +190,7 @@ fn run_ffmpeg_single_frame(
         });
     }
 
-    let Ok(img) = image::load_from_memory_with_format(&out.stdout, ImageFormat::Png) else {
+    let Ok(img) = decode_bounded_png_frame(&out.stdout) else {
         return Ok(FfmpegFrameAttempt {
             frame: None,
             parsed_duration_ms,

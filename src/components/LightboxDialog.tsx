@@ -95,8 +95,10 @@ export function LightboxDialog({
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [imageUrl, setImageUrl] = useState<string | undefined>(undefined);
+  const [imageError, setImageError] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | undefined>(undefined);
   const [videoError, setVideoError] = useState(false);
+  const triedDisplayFallbackRef = useRef(false);
   const [videoFallbackBlobUrl, setVideoFallbackBlobUrl] = useState<string | null>(null);
   const [videoLoop, setVideoLoop] = useState(false);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
@@ -141,6 +143,8 @@ export function LightboxDialog({
 
   useEffect(() => {
     setVideoError(false);
+    setImageError(false);
+    triedDisplayFallbackRef.current = false;
     if (!open || !currentItem) {
       setImageUrl(undefined);
       setVideoUrl(undefined);
@@ -172,12 +176,23 @@ export function LightboxDialog({
     setVideoUrl(undefined);
     let active = true;
     setImageUrl(undefined);
+    const targetId = currentItem.id;
+    const targetMime = currentItem.coverMimeType;
     void imageMemoryCache
-      .getFullImageUrl(currentItem.id, currentItem.coverMimeType)
+      .getFullImageUrl(targetId, targetMime)
       .then((url) => {
         if (active) setImageUrl(url);
       })
-      .catch(() => {});
+      .catch(async () => {
+        if (!active) return;
+        triedDisplayFallbackRef.current = true;
+        try {
+          const fallbackUrl = await imageMemoryCache.getDisplayFallbackUrl(targetId, targetMime);
+          if (active) setImageUrl(fallbackUrl);
+        } catch {
+          if (active) setImageError(true);
+        }
+      });
 
     return () => {
       active = false;
@@ -435,8 +450,18 @@ export function LightboxDialog({
         >
           {isVideo && currentItem ? (
             videoError ? (
-              <div className="video-thumb-placeholder" style={{ padding: 24 }}>
-                <span>この動画を再生できませんでした</span>
+              <div className="media-error-fallback">
+                <span>この動画は現在の環境では再生できませんでした（未対応コーデックまたは破損の可能性があります）</span>
+                {currentItem.deletedAt === null && onPlainExport && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => onPlainExport(currentItem)}
+                  >
+                    <Download size={13} />
+                    {isWebClient ? "ファイルをダウンロード" : "外部アプリ用に書き出し..."}
+                  </button>
+                )}
               </div>
             ) : videoUrl ? (
               <video
@@ -451,6 +476,13 @@ export function LightboxDialog({
                 width={currentItem.width > 0 ? currentItem.width : undefined}
                 height={currentItem.height > 0 ? currentItem.height : undefined}
                 className="lightbox-video"
+                onLoadedMetadata={(e) => {
+                  // Audio-only or unsupported video track (e.g. HEVC without decoder) renders black; surface fallback instead
+                  if (e.currentTarget.videoWidth === 0 || e.currentTarget.videoHeight === 0) {
+                    e.currentTarget.pause();
+                    setVideoError(true);
+                  }
+                }}
                 onError={() => {
                   if (
                     !imageMemoryCache.usesHttpMediaStream() &&
@@ -475,6 +507,24 @@ export function LightboxDialog({
             ) : (
               <span style={{ color: "var(--text-secondary)" }}>動画を読み込み中...</span>
             )
+          ) : imageError && currentItem ? (
+            <div
+              className="media-error-fallback"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span>この画像はこの表示環境では描画できませんでした（未対応プロファイルまたは破損の可能性があります）</span>
+              {currentItem.deletedAt === null && onPlainExport && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => onPlainExport(currentItem)}
+                >
+                  <Download size={13} />
+                  {isWebClient ? "ファイルをダウンロード" : "外部アプリ用に書き出し..."}
+                </button>
+              )}
+            </div>
           ) : imageUrl ? (
             <div
               ref={stageRef}
@@ -500,6 +550,25 @@ export function LightboxDialog({
                         : { width: nw, height: nh }
                     );
                   }
+                }}
+                onError={() => {
+                  if (currentItem && !triedDisplayFallbackRef.current) {
+                    triedDisplayFallbackRef.current = true;
+                    const targetId = currentItem.id;
+                    const targetMime = currentItem.coverMimeType;
+                    void imageMemoryCache
+                      .getDisplayFallbackUrl(targetId, targetMime)
+                      .then((fallbackUrl) => {
+                        setImageUrl(fallbackUrl);
+                      })
+                      .catch(() => {
+                        setImageUrl(undefined);
+                        setImageError(true);
+                      });
+                    return;
+                  }
+                  setImageUrl(undefined);
+                  setImageError(true);
                 }}
                 style={
                   naturalSize

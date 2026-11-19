@@ -15,6 +15,38 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+const SUPPORTED_MEDIA_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "jpe",
+  "jfif",
+  "webp",
+  "gif",
+  "avif",
+  "bmp",
+  "dib",
+  "tif",
+  "tiff",
+  "ico",
+  "mp4",
+  "m4v",
+  "mov",
+  "qt",
+  "webm",
+]);
+
+function isSupportedClipboardMediaFile(file: File): boolean {
+  if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+    return true;
+  }
+  if (!file.type) {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    return SUPPORTED_MEDIA_EXTENSIONS.has(ext);
+  }
+  return false;
+}
+
 interface UseImportFlowOptions {
   isOpen: boolean;
   canEdit: boolean;
@@ -136,7 +168,13 @@ export function useImportFlow({
           agg.errors.push(...rep.errors);
         } catch (err) {
           const msg = formatErrorMessage(err);
-          if (msg.includes("非対応")) {
+          const code = (err as { code?: string })?.code;
+          if (
+            code === "UNSUPPORTED_FORMAT" ||
+            msg.includes("非対応") ||
+            msg.includes("未対応") ||
+            msg.includes("のみ対応")
+          ) {
             agg.skippedUnsupportedCount += 1;
           } else {
             agg.errors.push(`${file.name}: ${msg}`);
@@ -162,7 +200,23 @@ export function useImportFlow({
         filters: [
           {
             name: "画像・動画ファイル",
-            extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif", "mp4", "webm", "mov", "m4v"],
+            extensions: [
+              "png",
+              "jpg",
+              "jpeg",
+              "webp",
+              "gif",
+              "avif",
+              "bmp",
+              "dib",
+              "tif",
+              "tiff",
+              "ico",
+              "mp4",
+              "webm",
+              "mov",
+              "m4v",
+            ],
           },
         ],
       });
@@ -335,17 +389,27 @@ export function useImportFlow({
       pasteHandledRef.current = true;
       e.preventDefault();
 
-      const clipItems = Array.from(e.clipboardData?.items ?? []);
-      const imageFiles = clipItems
-        .filter((it) => it.type.startsWith("image/"))
-        .map((it) => it.getAsFile())
-        .filter((f): f is File => f !== null);
+      const directFiles = Array.from(e.clipboardData?.files ?? []);
+      const clipFiles =
+        directFiles.length > 0
+          ? directFiles
+          : Array.from(e.clipboardData?.items ?? [])
+              .filter((it) => it.kind === "file")
+              .map((it) => it.getAsFile())
+              .filter((f): f is File => f !== null);
+      const mediaFiles = clipFiles.filter(isSupportedClipboardMediaFile);
+      const unsupportedFileCount = clipFiles.length - mediaFiles.length;
       const pastedText = e.clipboardData?.getData("text/plain")?.trim() ?? "";
 
       try {
-        if (imageFiles.length > 0) {
-          const rep = await uploadBrowserFiles(imageFiles, currentFolderId);
+        if (mediaFiles.length > 0) {
+          const rep = await uploadBrowserFiles(mediaFiles, currentFolderId);
+          rep.skippedUnsupportedCount += unsupportedFileCount;
           await handleImportReport(rep);
+          return;
+        }
+        if (unsupportedFileCount > 0) {
+          pushToast("warning", `非対応のファイル形式のため ${unsupportedFileCount}件をスキップしました`);
           return;
         }
         if (/^https?:\/\/\S+$/i.test(pastedText)) {

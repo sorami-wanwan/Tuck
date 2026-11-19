@@ -90,6 +90,37 @@ export function isVideoMime(mimeType: string): boolean {
   return mimeType.startsWith("video/");
 }
 
+export function formatMimeBadge(mimeType: string): string {
+  switch (mimeType.trim().toLowerCase()) {
+    case "image/png":
+      return "PNG";
+    case "image/jpeg":
+      return "JPG";
+    case "image/webp":
+      return "WEBP";
+    case "image/gif":
+      return "GIF";
+    case "image/avif":
+      return "AVIF";
+    case "image/bmp":
+    case "image/x-ms-bmp":
+      return "BMP";
+    case "image/tiff":
+      return "TIFF";
+    case "image/x-icon":
+    case "image/vnd.microsoft.icon":
+      return "ICO";
+    case "video/mp4":
+      return "MP4";
+    case "video/webm":
+      return "WEBM";
+    case "video/quicktime":
+      return "MOV";
+    default:
+      return isVideoMime(mimeType) ? "VIDEO" : "IMG";
+  }
+}
+
 export function formatDurationMs(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs <= 0) return "";
   const totalSec = Math.max(1, Math.round(durationMs / 1000));

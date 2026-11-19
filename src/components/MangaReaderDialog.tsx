@@ -103,6 +103,8 @@ export function MangaReaderDialog({
   const stageRef = useRef<HTMLDivElement>(null);
   const [pageIdx, setPageIdx] = useState(0);
   const [pageUrls, setPageUrls] = useState<Record<string, string>>({});
+  const [failedPages, setFailedPages] = useState<Record<string, boolean>>({});
+  const retriedDisplayPagesRef = useRef<Set<string>>(new Set());
   const [naturalDims, setNaturalDims] = useState<Record<string, { w: number; h: number }>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [hudHidden, setHudHidden] = useState(false);
@@ -129,6 +131,8 @@ export function MangaReaderDialog({
   useEffect(() => {
     setPageIdx(0);
     setHudHidden(false);
+    setFailedPages({});
+    retriedDisplayPagesRef.current.clear();
     if (group) {
       setLocalPrefs({
         readingDir: group.readingDir,
@@ -281,6 +285,7 @@ export function MangaReaderDialog({
 
     const loadVisible = async () => {
       const updates: Record<string, string> = {};
+      const failUpdates: Record<string, boolean> = {};
       await Promise.all(
         activeSpread.map(async (idx) => {
           const p = pages[idx];
@@ -288,13 +293,33 @@ export function MangaReaderDialog({
           try {
             const url = await imageMemoryCache.getFullImageUrl(p.itemId, p.mimeType);
             updates[p.itemId] = url;
+            failUpdates[p.itemId] = false;
           } catch {
-            // ignore
+            if (!retriedDisplayPagesRef.current.has(p.itemId)) {
+              retriedDisplayPagesRef.current.add(p.itemId);
+              try {
+                const fallbackUrl = await imageMemoryCache.getDisplayFallbackUrl(
+                  p.itemId,
+                  p.mimeType
+                );
+                updates[p.itemId] = fallbackUrl;
+                failUpdates[p.itemId] = false;
+                return;
+              } catch {
+                // fall through
+              }
+            }
+            failUpdates[p.itemId] = true;
           }
         })
       );
       if (active) {
-        setPageUrls((prev) => ({ ...prev, ...updates }));
+        if (Object.keys(updates).length > 0) {
+          setPageUrls((prev) => ({ ...prev, ...updates }));
+        }
+        if (Object.keys(failUpdates).length > 0) {
+          setFailedPages((prev) => ({ ...prev, ...failUpdates }));
+        }
       }
     };
 
@@ -570,8 +595,32 @@ export function MangaReaderDialog({
           >
             {orderedVisiblePages.map((p) => {
               const url = pageUrls[p.itemId];
+              const isFailed = Boolean(failedPages[p.itemId]);
               const dim = stageLayout.sizes.get(p.itemId);
-              return url ? (
+              return isFailed ? (
+                <div
+                  key={p.itemId}
+                  className="media-error-fallback"
+                  style={{
+                    inlineSize: dim?.width ?? 400,
+                    blockSize: dim?.height ?? 600,
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span>P.{p.pageOrder + 1} をこの表示環境では描画できませんでした</span>
+                  {group && group.deletedAt === null && onPlainExport && (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => onPlainExport(group)}
+                    >
+                      <Download size={13} />
+                      {isWebClient ? "ZIP でダウンロード" : "フォルダとして書き出し..."}
+                    </button>
+                  )}
+                </div>
+              ) : url ? (
                 <img
                   key={p.itemId}
                   src={url}
@@ -588,6 +637,21 @@ export function MangaReaderDialog({
                         return { ...prev, [p.itemId]: { w: nw, h: nh } };
                       });
                     }
+                  }}
+                  onError={() => {
+                    if (!retriedDisplayPagesRef.current.has(p.itemId)) {
+                      retriedDisplayPagesRef.current.add(p.itemId);
+                      void imageMemoryCache
+                        .getDisplayFallbackUrl(p.itemId, p.mimeType)
+                        .then((fallbackUrl) => {
+                          setPageUrls((prev) => ({ ...prev, [p.itemId]: fallbackUrl }));
+                        })
+                        .catch(() => {
+                          setFailedPages((prev) => ({ ...prev, [p.itemId]: true }));
+                        });
+                      return;
+                    }
+                    setFailedPages((prev) => ({ ...prev, [p.itemId]: true }));
                   }}
                   style={
                     dim

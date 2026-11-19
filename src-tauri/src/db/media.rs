@@ -10,7 +10,8 @@ use crate::crypto::{normalize_nfc_trimmed, sha256_file_hex, sha256_hex};
 use crate::error::VaultError;
 use crate::imaging::{
     detect_mime, is_video_mime, process_client_png_thumbnail, process_image_bytes,
-    GeneratedThumbnail,
+    read_file_head, validate_media_container_prefix, GeneratedThumbnail, HEADER_SNIFF_BYTES,
+    MAX_IMAGE_FILE_BYTES,
 };
 use crate::models::{
     EntryKind, EntryRef, ItemDetail, TagWithCount, ThumbnailRegenScope, ThumbnailStats,
@@ -147,19 +148,24 @@ impl VaultDb {
         chunk_size: usize,
     ) -> Result<ImportOutcome, VaultError> {
         let file_len = fs::metadata(path)?.len();
+        if file_len == 0 {
+            return Err(VaultError::CorruptedImage(
+                "空のファイル（0 バイト）は取り込めません".to_string(),
+            ));
+        }
+
+        // Sniff container header before reading entire multi-MB files into memory.
+        let head = read_file_head(path, HEADER_SNIFF_BYTES)?;
+        let mime_type = detect_mime(&head)?;
+        validate_media_container_prefix(mime_type, &head, file_len)?;
+
         if file_len <= chunk_threshold {
             let bytes = fs::read(path)?;
             return self.import_media_bytes(&bytes, default_title, source_url, duration_ms);
         }
 
-        let mut head = [0u8; 64];
-        let head_len = {
-            let mut file = fs::File::open(path)?;
-            read_up_to(&mut file, &mut head)?
-        };
-        let mime_type = detect_mime(&head[..head_len])?;
         if !is_video_mime(mime_type) {
-            if file_len <= 512 * 1024 * 1024 {
+            if file_len <= MAX_IMAGE_FILE_BYTES {
                 let bytes = fs::read(path)?;
                 return self.import_media_bytes(&bytes, default_title, source_url, duration_ms);
             }
@@ -626,6 +632,12 @@ impl VaultDb {
         let (mime_type, _, _) = self.get_media_info(item_id)?;
         let bytes = self.get_blob_bytes(item_id)?;
         Ok((mime_type, bytes))
+    }
+
+    #[cfg(test)]
+    pub fn get_display_image_bytes(&self, item_id: &str) -> Result<Vec<u8>, VaultError> {
+        let (mime_type, bytes) = self.get_media_blob_with_mime(item_id)?;
+        crate::imaging::render_display_webp(&mime_type, &bytes)
     }
 
     pub fn get_export_item_meta(&self, item_id: &str) -> Result<ExportItemMeta, VaultError> {

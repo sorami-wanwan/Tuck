@@ -232,6 +232,22 @@ async fn test_lan_server_auth_security_rbac_streaming_and_lock() {
         _ => panic!("expected imported image"),
     };
 
+    let mut tiff_img = image::RgbaImage::new(16, 12);
+    for (x, y, px) in tiff_img.enumerate_pixels_mut() {
+        *px = image::Rgba([(x * 10) as u8, (y * 15) as u8, 220, 255]);
+    }
+    let mut tiff_bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(tiff_img)
+        .write_to(
+            &mut std::io::Cursor::new(&mut tiff_bytes),
+            image::ImageFormat::Tiff,
+        )
+        .unwrap();
+    let tiff_id = match db.import_bytes(&tiff_bytes, Some("sample_tiff")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected imported tiff"),
+    };
+
     let mp4 = sample_mp4_bytes();
     let video_id = match db
         .import_media_bytes(&mp4, Some("sample_vid"), None, 1200)
@@ -419,6 +435,32 @@ async fn test_lan_server_auth_security_rbac_streaming_and_lock() {
     assert_eq!(v_status_json["urlImportSettings"]["cookieBrowser"], "");
     assert!(v_status_json.get("localMediaBaseUrl").is_none());
     assert!(v_status_json.get("localMediaToken").is_none());
+
+    // 5b. /api/images/{id}/display converts TIFF -> WebP and rejects video with UNSUPPORTED_FORMAT
+    let disp_ok = send_raw_http(
+        port,
+        "GET",
+        &format!("/api/images/{tiff_id}/display"),
+        &[("Cookie", &cookie_pair)],
+        b"",
+    )
+    .await;
+    assert_eq!(disp_ok.status, 200);
+    assert_eq!(disp_ok.headers.get("content-type").unwrap(), "image/webp");
+    assert!(disp_ok.body.starts_with(b"RIFF"));
+    assert_eq!(&disp_ok.body[8..12], b"WEBP");
+
+    let disp_vid = send_raw_http(
+        port,
+        "GET",
+        &format!("/api/images/{video_id}/display"),
+        &[("Cookie", &cookie_pair)],
+        b"",
+    )
+    .await;
+    assert_eq!(disp_vid.status, 400);
+    let disp_vid_err: serde_json::Value = serde_json::from_slice(&disp_vid.body).unwrap();
+    assert_eq!(disp_vid_err["code"], "UNSUPPORTED_FORMAT");
 
     // 6. QR token login -> cookie + mediaToken
     let qr_token = rotated.qr_url.split("?k=").nth(1).unwrap();

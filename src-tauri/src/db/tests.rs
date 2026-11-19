@@ -61,6 +61,9 @@ fn make_minimal_avif_bytes() -> Vec<u8> {
     bytes.extend_from_slice(&0u32.to_be_bytes());
     bytes.extend_from_slice(b"avif");
     bytes.extend_from_slice(b"mif1");
+    bytes.extend_from_slice(&12u32.to_be_bytes());
+    bytes.extend_from_slice(b"meta");
+    bytes.extend_from_slice(&0u32.to_be_bytes());
     bytes.extend_from_slice(b"FAKE_AVIF_PAYLOAD_BYTES");
     bytes
 }
@@ -771,9 +774,11 @@ fn make_minimal_mov_bytes() -> Vec<u8> {
 }
 
 fn make_minimal_webm_bytes() -> Vec<u8> {
-    let mut bytes = vec![0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x82, 0x84];
+    // EBML header size = 7 (0x87): DocType (0x42 0x82) len 4 (0x84) = "webm", followed by minimal Segment element
+    let mut bytes = vec![0x1A, 0x45, 0xDF, 0xA3, 0x87, 0x42, 0x82, 0x84];
     bytes.extend_from_slice(b"webm");
-    bytes.extend_from_slice(b"WEBM_PAYLOAD");
+    bytes.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0x88]);
+    bytes.extend_from_slice(b"WEBM_DAT");
     bytes
 }
 
@@ -1228,4 +1233,74 @@ fn test_thumbnail_regen_targets_stats_and_dimension_overwrite() {
         .unwrap();
     assert_eq!(all_targets.len(), 6);
     assert!(!all_targets.iter().any(|t| t.item_id == trashed_id));
+}
+
+#[test]
+fn test_edge_cases_bmp_tiff_ico_zero_byte_and_truncated_containers() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("edge_cases.vault");
+    let mut db = VaultDb::create(&vault_path, "pass-edge", false).unwrap();
+
+    // 1. 0-byte file must fail with CorruptedImage without touching DB
+    let zero_path = dir.path().join("empty.png");
+    fs::write(&zero_path, b"").unwrap();
+    assert!(matches!(
+        db.import_media_file(&zero_path, Some("empty"), None, 0),
+        Err(VaultError::CorruptedImage(_))
+    ));
+    assert_eq!(db.status().unwrap().item_count, 0);
+
+    // 2. Truncated header-only MP4 (ftyp only, no moov/mdat) rejected both inline and chunked
+    let mut mp4_stub = Vec::new();
+    mp4_stub.extend_from_slice(&24u32.to_be_bytes());
+    mp4_stub.extend_from_slice(b"ftyp");
+    mp4_stub.extend_from_slice(b"isom");
+    mp4_stub.extend_from_slice(&0u32.to_be_bytes());
+    mp4_stub.extend_from_slice(b"isom");
+    mp4_stub.extend_from_slice(b"mp41");
+    let stub_path = dir.path().join("stub.mp4");
+    fs::write(&stub_path, &mp4_stub).unwrap();
+    assert!(matches!(
+        db.import_media_file_with_chunk_params(&stub_path, Some("stub"), None, 0, 12, 4096),
+        Err(VaultError::CorruptedImage(_))
+    ));
+    let chunk_rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM blob_chunks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(chunk_rows, 0);
+    assert_eq!(db.status().unwrap().item_count, 0);
+
+    // 3. BMP, TIFF, and ICO full roundtrip + display WebP + regenerate + plain export filenames
+    let mut img = RgbaImage::new(48, 32);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = Rgba([(x * 5) as u8, (y * 7) as u8, 190, 255]);
+    }
+    let dyn_img = DynamicImage::ImageRgba8(img);
+
+    for (fmt, expected_mime, expected_ext) in [
+        (ImageFormat::Bmp, "image/bmp", ".bmp"),
+        (ImageFormat::Tiff, "image/tiff", ".tiff"),
+        (ImageFormat::Ico, "image/x-icon", ".ico"),
+    ] {
+        let mut raw = Vec::new();
+        dyn_img
+            .write_to(&mut Cursor::new(&mut raw), fmt)
+            .unwrap();
+        let id = import_id(&mut db, &raw, Some("sample"));
+        let detail = db.get_item_detail(&id).unwrap();
+        assert_eq!(detail.mime_type, expected_mime);
+        assert_eq!((detail.width, detail.height), (48, 32));
+        assert!(detail.has_thumbnail);
+
+        let display_webp = db.get_display_image_bytes(&id).unwrap();
+        assert_eq!(&display_webp[0..4], b"RIFF");
+        assert_eq!(&display_webp[8..12], b"WEBP");
+
+        let regen = db.regenerate_standard_image_thumbnail(&id).unwrap();
+        assert!(regen.has_thumbnail);
+
+        let filename = crate::plain_export::build_item_filename("sample", &id, expected_mime);
+        assert!(filename.ends_with(expected_ext));
+    }
 }

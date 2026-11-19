@@ -12,6 +12,7 @@ use crate::error::VaultError;
 use crate::state::AppState;
 
 pub const MAX_STREAM_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_EXPLICIT_RANGE_SLICE_BYTES: usize = 16 * 1024 * 1024;
 const INLINE_CHUNKED_THRESHOLD: usize = 64 * 1024 * 1024;
 const HTTP_SUBCHUNK_BYTES: usize = 256 * 1024;
 
@@ -262,7 +263,7 @@ pub fn resolve_media_slice(
                     body: Vec::new(),
                 });
             };
-            let end = raw_end.min(start.saturating_add(MAX_STREAM_CHUNK_BYTES.saturating_sub(1)));
+            let end = raw_end.min(start.saturating_add(MAX_EXPLICIT_RANGE_SLICE_BYTES.saturating_sub(1)));
             let len = end.saturating_sub(start).saturating_add(1);
             let body = if is_head {
                 Vec::new()
@@ -324,7 +325,7 @@ pub fn resolve_media_slice(
                 body: Vec::new(),
             });
         };
-        let end = raw_end.min(start.saturating_add(MAX_STREAM_CHUNK_BYTES.saturating_sub(1)));
+        let end = raw_end.min(start.saturating_add(MAX_EXPLICIT_RANGE_SLICE_BYTES.saturating_sub(1)));
         let slice = &bytes[start..=end];
         let body = if is_head { Vec::new() } else { slice.to_vec() };
         return Ok(MediaStreamSlice {
@@ -494,5 +495,50 @@ mod tests {
         assert_eq!(c_head.status, StatusCode::OK);
         assert_eq!(c_head.content_length, chunked_bytes.len());
         assert!(c_head.body.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_media_slice_large_explicit_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("range_large.vault");
+        let mut db = VaultDb::create(&vault_path, "secret-pass", true).unwrap();
+
+        let mut big_mp4 = vec![
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'm', b'p', b'4', b'2', 0x00, 0x00,
+            0x00, 0x00, b'm', b'p', b'4', b'2', b'i', b's', b'o', b'm',
+        ];
+        big_mp4.resize(7 * 1024 * 1024, 0x55);
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&big_mp4).unwrap();
+        f.flush().unwrap();
+
+        let id = match db
+            .import_media_file_with_chunk_params(f.path(), Some("big"), None, 1000, 100, 1024 * 1024)
+            .unwrap()
+        {
+            ImportOutcome::Imported { id, .. } => id,
+            _ => panic!("expected chunked imported"),
+        };
+
+        let state = AppState::default();
+        {
+            let mut guard = state.lock_db().unwrap();
+            *guard = Some(db);
+        }
+
+        // Open-ended range stays bounded to MAX_STREAM_CHUNK_BYTES (4 MiB)
+        let open_slice = resolve_media_slice(&state, &id, false, Some("bytes=0-")).unwrap();
+        assert_eq!(open_slice.body.len(), MAX_STREAM_CHUNK_BYTES);
+
+        // Explicit range up to 6 MiB honors the full requested range (<= 16 MiB cap)
+        let explicit_end = 6 * 1024 * 1024 - 1;
+        let explicit_slice = resolve_media_slice(
+            &state,
+            &id,
+            false,
+            Some(&format!("bytes=0-{explicit_end}")),
+        )
+        .unwrap();
+        assert_eq!(explicit_slice.body.len(), 6 * 1024 * 1024);
     }
 }

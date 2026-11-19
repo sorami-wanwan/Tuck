@@ -222,6 +222,7 @@ where
 {
     let item_total = batch.items.len();
     let mut report = ImportReport::default();
+    let mut first_err: Option<VaultError> = None;
 
     for (idx, item) in batch.items.iter().enumerate() {
         on_progress(UrlImportProgressEvent {
@@ -236,27 +237,33 @@ where
             item_total: (item_total > 1).then_some(item_total),
         });
 
-        let outcome = match &item.payload {
+        let item_label = if item.title.trim().is_empty() {
+            format!("item #{}", idx + 1)
+        } else {
+            item.title.clone()
+        };
+
+        let outcome_res = match &item.payload {
             DownloadedItemPayload::Memory(bytes) => db.import_media_bytes(
                 bytes,
                 Some(&item.title),
                 Some(&item.source_url),
                 item.duration_ms,
-            )?,
+            ),
             DownloadedItemPayload::File(file_path) => db.import_media_file(
                 file_path,
                 Some(&item.title),
                 Some(&item.source_url),
                 item.duration_ms,
-            )?,
+            ),
         };
 
-        match outcome {
-            ImportOutcome::Imported {
+        match outcome_res {
+            Ok(ImportOutcome::Imported {
                 id,
                 mime_type,
                 thumb_pending,
-            } => {
+            }) => {
                 if let Some(fid) = folder_id {
                     db.add_entries_to_folder(
                         fid,
@@ -275,12 +282,23 @@ where
                 }
                 report.imported_ids.push(id);
             }
-            ImportOutcome::Duplicate => {
+            Ok(ImportOutcome::Duplicate) => {
                 report.duplicate_count += 1;
+            }
+            Err(e) => {
+                report.errors.push(format!("{item_label}: {e}"));
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
             }
         }
     }
 
     report.errors.extend(batch.warnings.iter().cloned());
+    if report.imported_ids.is_empty() && report.duplicate_count == 0 {
+        if let Some(err) = first_err {
+            return Err(err);
+        }
+    }
     Ok(report)
 }

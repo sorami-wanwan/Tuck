@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -297,11 +296,8 @@ fn find_staged_media_file(dir: &Path) -> Option<PathBuf> {
 }
 
 fn read_file_head(path: &Path) -> Result<Vec<u8>, VaultError> {
-    let mut f = fs::File::open(path)?;
-    let mut buf = vec![0u8; 64];
-    let n = f.read(&mut buf)?;
-    buf.truncate(n);
-    Ok(buf)
+    crate::imaging::read_file_head(path, crate::imaging::HEADER_SNIFF_BYTES)
+        .map_err(VaultError::from)
 }
 
 struct YtDlpExecContext<'a> {

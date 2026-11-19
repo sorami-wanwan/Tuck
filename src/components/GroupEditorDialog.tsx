@@ -22,6 +22,7 @@ function PageThumb({ itemId }: { itemId: string }) {
   const [url, setUrl] = useState<string | undefined>(() =>
     imageMemoryCache.getCachedThumbnailUrl(itemId)
   );
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     setThumbVer(imageMemoryCache.getThumbnailVersion(itemId));
@@ -32,6 +33,7 @@ function PageThumb({ itemId }: { itemId: string }) {
 
   useEffect(() => {
     let active = true;
+    setFailed(false);
     const cached = imageMemoryCache.getCachedThumbnailUrl(itemId);
     if (cached) {
       setUrl(cached);
@@ -43,7 +45,9 @@ function PageThumb({ itemId }: { itemId: string }) {
       .then((u) => {
         if (active) setUrl(u);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (active) setFailed(true);
+      });
     return () => {
       active = false;
     };
@@ -51,7 +55,23 @@ function PageThumb({ itemId }: { itemId: string }) {
 
   return (
     <div className="page-editor-thumb">
-      {url ? <img src={url} alt="" draggable={false} /> : <div className="thumb-skeleton" />}
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          onError={() => {
+            setUrl(undefined);
+            setFailed(true);
+          }}
+        />
+      ) : failed ? (
+        <div className="video-thumb-placeholder">
+          <span>IMG</span>
+        </div>
+      ) : (
+        <div className="thumb-skeleton" />
+      )}
     </div>
   );
 }
@@ -106,7 +126,12 @@ export function GroupEditorDialog({
       title: "グループに追加する画像を選択",
       multiple: true,
       directory: false,
-      filters: [{ name: "画像ファイル", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif"] }],
+      filters: [
+        {
+          name: "画像ファイル",
+          extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif", "bmp", "dib", "tif", "tiff", "ico"],
+        },
+      ],
     });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
@@ -129,7 +154,7 @@ export function GroupEditorDialog({
         ref={browserFileInputRef}
         type="file"
         multiple
-        accept="image/*"
+        accept=".png,.jpg,.jpeg,.jpe,.webp,.gif,.avif,.bmp,.dib,.tif,.tiff,.ico,image/*"
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.currentTarget.files ?? []);

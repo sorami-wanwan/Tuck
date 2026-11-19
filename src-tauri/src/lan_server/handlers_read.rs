@@ -183,6 +183,28 @@ pub(super) async fn handle_get_image(
         .map_err(|e| LanApiError::from(VaultError::LanShare(e.to_string())))
 }
 
+pub(super) async fn handle_get_display_image(
+    State(runtime): State<Arc<LanServerRuntime>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, LanApiError> {
+    require_read_checked(&runtime, &headers)?;
+    let (mime_type, bytes) = run_db(&runtime, move |db| db.get_media_blob_with_mime(&id)).await?;
+    crate::imaging::ensure_display_convertible(&mime_type)?;
+    let webp_bytes = tokio::task::spawn_blocking(move || {
+        crate::imaging::render_display_webp(&mime_type, &bytes)
+    })
+    .await
+    .map_err(|e| LanApiError::from(VaultError::LanShare(e.to_string())))??;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/webp")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_LENGTH, webp_bytes.len().to_string())
+        .body(Body::from(webp_bytes))
+        .map_err(|e| LanApiError::from(VaultError::LanShare(e.to_string())))
+}
+
 #[derive(Deserialize)]
 pub(super) struct MediaQuery {
     #[serde(rename = "mt")]

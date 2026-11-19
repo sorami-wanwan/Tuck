@@ -27,6 +27,7 @@ import { imageMemoryCache } from "../services/imageCache";
 import {
   entryKey,
   formatDurationMs,
+  formatMimeBadge,
   isVideoMime,
   type GalleryEntry,
   type ThumbFitMode,
@@ -69,26 +70,7 @@ const GRID_GAP = 12;
 const GRID_PADDING = 28;
 
 function shortFormatLabel(mimeType: string): string {
-  switch (mimeType) {
-    case "image/png":
-      return "PNG";
-    case "image/jpeg":
-      return "JPG";
-    case "image/webp":
-      return "WEBP";
-    case "image/gif":
-      return "GIF";
-    case "image/avif":
-      return "AVIF";
-    case "video/mp4":
-      return "MP4";
-    case "video/webm":
-      return "WEBM";
-    case "video/quicktime":
-      return "MOV";
-    default:
-      return isVideoMime(mimeType) ? "VIDEO" : "IMG";
-  }
+  return formatMimeBadge(mimeType);
 }
 
 interface ThumbCardProps {
@@ -155,23 +137,29 @@ function ThumbCard({
         const hasThumb =
           entry.coverHasThumbnail || imageMemoryCache.hasKnownThumbnail(coverId);
         if (!hasThumb) {
-          if (!canEdit) {
+          const isAvif = entry.coverMimeType === "image/avif";
+          const isVid = isVideoMime(entry.coverMimeType);
+          if (!isAvif && !isVid && !canEdit) {
             if (active) setFailed(true);
             return;
           }
           if (
-            (entry.coverMimeType === "image/avif" || isVideoMime(entry.coverMimeType)) &&
+            (isAvif || isVid) &&
             imageMemoryCache.hasPendingThumbnailFailed(coverId)
           ) {
             if (active) setFailed(true);
             return;
           }
-          if (entry.coverMimeType === "image/avif") {
-            await imageMemoryCache.processPendingAvifThumbnail(coverId);
-            if (active) onAvifCompletedRef.current();
-          } else if (isVideoMime(entry.coverMimeType)) {
-            await imageMemoryCache.processPendingVideoThumbnail(coverId, entry.coverMimeType);
-            if (active) onAvifCompletedRef.current();
+          if (isAvif) {
+            await imageMemoryCache.processPendingAvifThumbnail(coverId, {
+              persist: canEdit,
+            });
+            if (active && canEdit) onAvifCompletedRef.current();
+          } else if (isVid) {
+            await imageMemoryCache.processPendingVideoThumbnail(coverId, entry.coverMimeType, {
+              persist: canEdit,
+            });
+            if (active && canEdit) onAvifCompletedRef.current();
           }
         }
         const nextUrl = await imageMemoryCache.getThumbnailUrl(coverId);
@@ -191,7 +179,10 @@ function ThumbCard({
   const durationLabel = isVideo ? formatDurationMs(entry.durationMs) : "";
   const showFormatBadge =
     entry.kind === "image" &&
-    (entry.coverMimeType === "image/gif" || entry.coverMimeType === "image/avif" || isVideo);
+    (entry.coverMimeType === "image/gif" ||
+      entry.coverMimeType === "image/avif" ||
+      entry.coverMimeType === "image/tiff" ||
+      isVideo);
 
   return (
     <div
@@ -224,6 +215,10 @@ function ThumbCard({
             alt={entry.title || (isVideo ? "動画" : "画像")}
             draggable={false}
             className={`thumb-img ${fitMode === "square" ? "fit-square" : "fit-ratio"}`}
+            onError={() => {
+              setUrl(undefined);
+              setFailed(true);
+            }}
           />
         ) : failed ? (
           <div className="video-thumb-placeholder">

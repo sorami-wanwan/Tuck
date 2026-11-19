@@ -34,6 +34,7 @@ import {
   type EntryRef,
   type FolderNode,
   type GalleryEntry,
+  type ImportReport,
   type ItemDetail,
   type LockSettings,
   type QueryScope,
@@ -594,6 +595,29 @@ export function App() {
     />
   );
 
+  const applyImportedPagesToGroup = async (gid: string, report: ImportReport) => {
+    const videoSet = new Set(report.videoPendingIds);
+    const imageIds = report.importedIds.filter((id) => !videoSet.has(id));
+    if (imageIds.length > 0) {
+      const updated = await vaultApi.addItemsToGroup(gid, imageIds);
+      gallery.setActiveModalGroup(updated);
+      if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
+      pushToast("success", `${imageIds.length}ページを追加しました`);
+    }
+    if (report.videoPendingIds.length > 0) {
+      pushToast(
+        "warning",
+        `動画ファイル ${report.videoPendingIds.length}件は漫画ページに追加できないため単体動画として取り込みました`
+      );
+    } else if (imageIds.length === 0 && report.errors.length > 0) {
+      pushToast("error", report.errors[0]);
+    } else if (imageIds.length === 0 && report.skippedUnsupportedCount > 0) {
+      pushToast("warning", "非対応のファイル形式のためスキップしました");
+    }
+    await refreshLibrary();
+    importFlow.processPendingThumbnails(report.avifPendingIds, report.videoPendingIds);
+  };
+
   return (
     <>
       {isWebClient && (
@@ -601,7 +625,7 @@ export function App() {
           ref={importFlow.browserUploadInputRef}
           type="file"
           multiple
-          accept="image/*,video/*"
+          accept=".png,.jpg,.jpeg,.jpe,.webp,.gif,.avif,.bmp,.dib,.tif,.tiff,.ico,.mp4,.m4v,.mov,.qt,.webm,image/*,video/*"
           style={{ display: "none" }}
           onChange={importFlow.handleBrowserUploadChange}
         />
@@ -1094,25 +1118,11 @@ export function App() {
         }}
         onAddFilesToGroup={async (gid, paths) => {
           const report = await vaultApi.importPaths(paths, null);
-          if (report.importedIds.length > 0) {
-            const updated = await vaultApi.addItemsToGroup(gid, report.importedIds);
-            gallery.setActiveModalGroup(updated);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-            pushToast("success", `${report.importedIds.length}ページを追加しました`);
-          }
-          await refreshLibrary();
-          importFlow.processPendingThumbnails(report.avifPendingIds, report.videoPendingIds);
+          await applyImportedPagesToGroup(gid, report);
         }}
         onAddBrowserFilesToGroup={async (gid, files) => {
           const report = await importFlow.uploadBrowserFiles(files, null);
-          if (report.importedIds.length > 0) {
-            const updated = await vaultApi.addItemsToGroup(gid, report.importedIds);
-            gallery.setActiveModalGroup(updated);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-            pushToast("success", `${report.importedIds.length}ページを追加しました`);
-          }
-          await refreshLibrary();
-          importFlow.processPendingThumbnails(report.avifPendingIds, report.videoPendingIds);
+          await applyImportedPagesToGroup(gid, report);
         }}
       />
 

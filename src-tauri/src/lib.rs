@@ -369,6 +369,7 @@ pub fn run() {
             commands::get_item_detail,
             commands::get_thumbnail,
             commands::get_image,
+            commands::get_display_image,
             commands::set_item_title,
             commands::set_item_rating,
             commands::set_item_memo,

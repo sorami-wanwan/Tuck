@@ -11,7 +11,10 @@ use walkdir::WalkDir;
 use crate::clipboard;
 use crate::db::{ImportOutcome, VaultDb};
 use crate::error::VaultError;
-use crate::imaging::is_video_mime;
+use crate::imaging::{
+    detect_mime, ensure_display_convertible, is_video_mime, read_file_head, render_display_webp,
+    validate_media_container_prefix, HEADER_SNIFF_BYTES, MAX_IMAGE_FILE_BYTES,
+};
 use crate::lan_server::{list_lan_interfaces, start_lan_server, AssetSource, LanHostNotifier};
 use crate::models::{
     natural_cmp, BackupReport, EntryKind, EntryRef, FolderNode, GalleryEntry, GroupDetail,
@@ -360,6 +363,53 @@ pub async fn import_folder_as_group(
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("file");
+                let file_len = match fs::metadata(&file_path) {
+                    Ok(m) => m.len(),
+                    Err(e) => {
+                        report.errors.push(format!("{label}: {e}"));
+                        continue;
+                    }
+                };
+                if file_len == 0 {
+                    report.errors.push(format!(
+                        "{label}: 空のファイル（0 バイト）は取り込めません"
+                    ));
+                    continue;
+                }
+                let head = match read_file_head(&file_path, HEADER_SNIFF_BYTES) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        report.errors.push(format!("{label}: {e}"));
+                        continue;
+                    }
+                };
+                let mime = match detect_mime(&head) {
+                    Ok(m) => m,
+                    Err(VaultError::UnsupportedFormat(_)) => {
+                        report.skipped_unsupported_count += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        report.errors.push(format!("{label}: {e}"));
+                        continue;
+                    }
+                };
+                if is_video_mime(mime) {
+                    // Manga groups only accept images; skip large videos before full fs::read.
+                    report.skipped_unsupported_count += 1;
+                    continue;
+                }
+                if let Err(e) = validate_media_container_prefix(mime, &head, file_len) {
+                    report.errors.push(format!("{label}: {e}"));
+                    continue;
+                }
+                if file_len > MAX_IMAGE_FILE_BYTES {
+                    report
+                        .errors
+                        .push(format!("{label}: 画像ファイルが大きすぎます（512 MB まで）"));
+                    continue;
+                }
+
                 match fs::read(&file_path) {
                     Ok(bytes) => {
                         let title = title_from_path(&file_path);
@@ -428,10 +478,12 @@ pub async fn import_bytes(
     let report = run_blocking(move || {
         with_open_db(&db_arc, |db| {
             let mut report = ImportReport::default();
-            let outcome = db.import_bytes(&raw_bytes, title.as_deref());
-            record_import_outcome(&mut report, outcome, "import_bytes");
-            if !report.errors.is_empty() {
-                return Err(VaultError::UnsupportedFormat(report.errors[0].clone()));
+            match db.import_bytes(&raw_bytes, title.as_deref()) {
+                Ok(outcome) => record_import_outcome(&mut report, Ok(outcome), "import_bytes"),
+                Err(VaultError::UnsupportedFormat(_)) => {
+                    report.skipped_unsupported_count += 1;
+                }
+                Err(e) => return Err(e),
             }
             if let Some(id) = report.imported_ids.first() {
                 if let Some(fid) = folder_id.as_deref() {
@@ -628,6 +680,22 @@ pub async fn get_image(
     let bytes =
         run_blocking(move || with_open_db(&db_arc, |db| db.get_blob_bytes(&item_id))).await?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn get_display_image(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<Response, VaultError> {
+    let db_arc = Arc::clone(&state.db);
+    let webp_bytes = run_blocking(move || {
+        // Read raw blob under DB lock, then release mutex before heavy image decoding.
+        let (mime_type, bytes) = with_open_db(&db_arc, |db| db.get_media_blob_with_mime(&item_id))?;
+        ensure_display_convertible(&mime_type)?;
+        render_display_webp(&mime_type, &bytes)
+    })
+    .await?;
+    Ok(Response::new(webp_bytes))
 }
 
 #[tauri::command]

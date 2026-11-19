@@ -20,6 +20,7 @@ import {
 import { imageMemoryCache } from "../services/imageCache";
 import {
   formatDurationMs,
+  formatMimeBadge,
   isVideoMime,
   type EntryRef,
   type FolderNode,
@@ -127,6 +128,7 @@ export function Inspector(props: InspectorProps) {
   const [tagInputOpen, setTagInputOpen] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
+  const [previewFailed, setPreviewFailed] = useState(false);
   const confirmDialogRef = useRef<HTMLDialogElement>(null);
   const memoTimerRef = useRef<number | null>(null);
 
@@ -177,6 +179,7 @@ export function Inspector(props: InspectorProps) {
   }, [previewCoverItemId, hidePreview]);
 
   useEffect(() => {
+    setPreviewFailed(false);
     if (!previewCoverItemId || hidePreview) {
       setPreviewUrl(undefined);
       return;
@@ -193,7 +196,9 @@ export function Inspector(props: InspectorProps) {
       .then((u) => {
         if (active) setPreviewUrl(u);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (active) setPreviewFailed(true);
+      });
     return () => {
       active = false;
     };
@@ -485,9 +490,9 @@ export function Inspector(props: InspectorProps) {
   const formatBadgeLabel =
     mode === "group" && groupDetail
       ? `${groupDetail.pageCount}P 漫画`
-      : itemDetail?.mimeType === "video/quicktime"
-        ? "MOV"
-        : itemDetail?.mimeType.replace("image/", "").replace("video/", "").toUpperCase();
+      : itemDetail
+        ? formatMimeBadge(itemDetail.mimeType)
+        : undefined;
 
   const handleMemoChange = (val: string) => {
     setMemoDraft(val);
@@ -545,7 +550,19 @@ export function Inspector(props: InspectorProps) {
             }}
           >
             {previewUrl ? (
-              <img src={previewUrl} alt={activeEntity.title || "プレビュー"} draggable={false} />
+              <img
+                src={previewUrl}
+                alt={activeEntity.title || "プレビュー"}
+                draggable={false}
+                onError={() => {
+                  setPreviewUrl(undefined);
+                  setPreviewFailed(true);
+                }}
+              />
+            ) : previewFailed ? (
+              <div className="video-thumb-placeholder">
+                <span>{formatBadgeLabel ?? "PREVIEW"}</span>
+              </div>
             ) : (
               <div className="thumb-skeleton" />
             )}

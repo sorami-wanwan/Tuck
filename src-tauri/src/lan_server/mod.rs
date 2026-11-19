@@ -41,10 +41,11 @@ use auth::{
 };
 use handlers_read::{
     handle_create_export_batch_ticket, handle_export_batch_by_ticket, handle_export_folder,
-    handle_export_group, handle_export_item, handle_get_group_detail, handle_get_image,
-    handle_get_item_detail, handle_get_media, handle_get_thumbnail, handle_head_export_folder,
-    handle_head_export_group, handle_head_export_item, handle_head_media, handle_list_folders,
-    handle_list_tags, handle_query_entries, handle_sse_events, handle_vault_status,
+    handle_export_group, handle_export_item, handle_get_display_image, handle_get_group_detail,
+    handle_get_image, handle_get_item_detail, handle_get_media, handle_get_thumbnail,
+    handle_head_export_folder, handle_head_export_group, handle_head_export_item,
+    handle_head_media, handle_list_folders, handle_list_tags, handle_query_entries,
+    handle_sse_events, handle_vault_status,
 };
 use handlers_write::{
     handle_add_entries_to_folder, handle_add_group_tag, handle_add_item_tag,
@@ -762,6 +763,7 @@ fn build_router(runtime: Arc<LanServerRuntime>) -> Router {
         .route("/api/tags", get(handle_list_tags))
         .route("/api/thumbnails/{id}", get(handle_get_thumbnail))
         .route("/api/images/{id}", get(handle_get_image))
+        .route("/api/images/{id}/display", get(handle_get_display_image))
         .route(
             "/api/media/{id}",
             get(handle_get_media).head(handle_head_media),
