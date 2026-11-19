@@ -141,7 +141,8 @@ fn test_encryption_at_rest_and_single_file() {
         &raw_vault,
         &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
     ));
-    assert!(!contains_subsequence(&raw_vault, &[0xFF, 0xD8, 0xFF]));
+    assert!(jpg.starts_with(&[0xFF, 0xD8, 0xFF]) && jpg.len() >= 16);
+    assert!(!contains_subsequence(&raw_vault, &jpg[..16]));
 }
 
 #[test]
