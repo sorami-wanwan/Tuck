@@ -1,0 +1,28 @@
+services:
+  linux-test:
+    image: tuck-linux-test:ubuntu-${UBUNTU_VERSION:-26.04}
+    build:
+      context: .
+      dockerfile: Dockerfile.linux-test
+      args:
+        UBUNTU_VERSION: ${UBUNTU_VERSION:-26.04}
+    entrypoint: ["bash", "/src/docker/run-linux-tests.sh"]
+    volumes:
+      - ..:/src:ro
+      - workspace:/workspace
+      - cargo-target:/cache/cargo-target
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - bun-cache:/cache/bun
+
+volumes:
+  workspace:
+    name: tuck-linux-${UBUNTU_VERSION:-26.04}-workspace
+  cargo-target:
+    name: tuck-linux-${UBUNTU_VERSION:-26.04}-cargo-target
+  cargo-registry:
+    name: tuck-linux-cargo-registry
+  cargo-git:
+    name: tuck-linux-cargo-git
+  bun-cache:
+    name: tuck-linux-bun-cache

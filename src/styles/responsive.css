@@ -1,0 +1,224 @@
+/* Mobile / Tablet Drawers, Safe-Area & Touch Adaptation */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 38;
+  background: rgba(8, 10, 15, 0.68);
+  backdrop-filter: blur(3px);
+}
+
+.inspector-drawer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block-end: 8px;
+  border-block-end: 1px solid var(--border-subtle);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hud-hidden .lightbox-hud,
+.hud-hidden .lightbox-nav-btn,
+.hud-hidden .reader-scrubber {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.lightbox-hud,
+.lightbox-nav-btn,
+.reader-scrubber {
+  transition: opacity 0.18s ease;
+}
+
+@supports (padding: env(safe-area-inset-top)) {
+  .toolbar-header {
+    padding-block-start: env(safe-area-inset-top);
+    background: var(--bg-panel);
+  }
+  .lightbox-hud {
+    padding-block-start: max(10px, env(safe-area-inset-top));
+    padding-inline-start: max(14px, env(safe-area-inset-left));
+    padding-inline-end: max(14px, env(safe-area-inset-right));
+  }
+  .reader-scrubber {
+    padding-block-end: max(8px, env(safe-area-inset-bottom));
+    padding-inline-start: max(16px, env(safe-area-inset-left));
+    padding-inline-end: max(16px, env(safe-area-inset-right));
+  }
+}
+
+@media (max-width: 1023px) {
+  .workspace-shell {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  }
+
+  .inspector.drawer-open {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-end: 0;
+    z-index: 44;
+    inline-size: min(320px, 88dvw);
+    block-size: 100svh;
+    box-shadow: -12px 0 36px rgba(0, 0, 0, 0.55);
+    padding-block-start: env(safe-area-inset-top, 0px);
+    padding-block-end: env(safe-area-inset-bottom, 0px);
+  }
+
+  .lightbox-dialog[open],
+  .manga-reader-dialog[open] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lightbox-drawer {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-end: 0;
+    z-index: 46;
+    inline-size: min(320px, 88dvw);
+    block-size: 100svh;
+    box-shadow: -12px 0 36px rgba(0, 0, 0, 0.65);
+    padding-block-start: env(safe-area-inset-top, 0px);
+    padding-block-end: env(safe-area-inset-bottom, 0px);
+  }
+}
+
+@media (max-width: 767px) {
+  .workspace-shell.mobile-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar-drawer-host {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-start: 0;
+    z-index: 50;
+    inline-size: min(296px, 84dvw);
+    block-size: 100svh;
+    transform: translateX(-105%);
+    transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+    pointer-events: none;
+  }
+
+  .sidebar-drawer-host.open {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+
+  .sidebar-drawer-host > .sidebar {
+    block-size: 100svh;
+    padding-block-start: env(safe-area-inset-top, 0px);
+    padding-block-end: env(safe-area-inset-bottom, 0px);
+    box-shadow: 12px 0 36px rgba(0, 0, 0, 0.55);
+  }
+
+  .lan-running-hero {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .lan-credentials-col {
+    inline-size: 100%;
+  }
+
+  .lan-mode-grid,
+  .settings-grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lightbox-hud {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .lightbox-hud-left {
+    flex: 1 1 180px;
+  }
+
+  .lightbox-controls {
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: flex-end;
+  }
+
+  .lightbox-viewport {
+    padding: 8px 10px;
+  }
+
+  .lightbox-nav-btn {
+    inline-size: 36px;
+    block-size: 48px;
+    opacity: 0.72;
+  }
+
+  .lightbox-nav-btn.prev {
+    inset-inline-start: 6px;
+  }
+
+  .lightbox-nav-btn.next {
+    inset-inline-end: 6px;
+  }
+
+  .multi-action-bar {
+    inline-size: calc(100dvw - 24px);
+    flex-wrap: wrap;
+    justify-content: center;
+    inset-block-end: max(14px, env(safe-area-inset-bottom, 14px));
+  }
+}
+
+@media (max-width: 639px) {
+  .toolbar-center {
+    display: none;
+  }
+
+  .toolbar-right {
+    flex-wrap: wrap;
+  }
+
+  .sidebar-brand {
+    block-size: auto;
+    min-block-size: var(--toolbar-height);
+    padding-block: 6px;
+    flex-wrap: wrap;
+  }
+
+  .sidebar-actions {
+    flex-wrap: wrap;
+    max-inline-size: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-drawer-host,
+  .lightbox-hud,
+  .lightbox-nav-btn,
+  .reader-scrubber {
+    transition: none;
+  }
+}
+
+@media (pointer: coarse) {
+  :root {
+    --target-size: 44px;
+  }
+
+  .toolbar .icon-btn,
+  .sidebar-actions .icon-btn,
+  .lightbox-hud .icon-btn,
+  .confirm-dialog .icon-btn,
+  .confirm-dialog .btn,
+  .mode-pill-btn {
+    min-inline-size: var(--target-size);
+    min-block-size: var(--target-size);
+  }
+
+  .nav-item,
+  .folder-tree-row {
+    min-block-size: var(--target-size);
+  }
+
+  .thumb-expand-btn {
+    display: none;
+  }
+}

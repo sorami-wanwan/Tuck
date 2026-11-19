@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tuck",
+  "version": "0.1.0",
+  "identifier": "app.tuck.desktop",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tuck",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 920,
+        "minHeight": 600,
+        "dragDropEnabled": true,
+        "backgroundColor": "#14171e"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: vaultmedia: http://vaultmedia.localhost https://vaultmedia.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost vaultmedia: http://vaultmedia.localhost https://vaultmedia.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "copyright": "Copyright (c) 2026 sorami-wanwan",
+    "license": "MIT",
+    "shortDescription": "Offline encrypted media & manga organizer",
+    "longDescription": "Tuck is an offline single-file encrypted vault application for organizing images, manga, and videos.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Japanese", "English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "recommends": ["fonts-noto-cjk"]
+      }
+    }
+  }
+}

@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.prepare.outputs.release_id }}
+      tag_name: ${{ steps.prepare.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare draft GitHub release
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v${VERSION}"
+          fi
+
+          EXISTING_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1 || true)"
+
+          if [ -n "${EXISTING_ID}" ]; then
+            RELEASE_ID="${EXISTING_ID}"
+          else
+            BODY="$(cat <<'EOF'
+          ## Tuck 配布ファイル一覧
+
+          お使いの OS に合わせてインストーラまたはパッケージをダウンロードしてください。
+
+          - **macOS (Apple Silicon / M1〜M4)**: `*_aarch64.dmg`
+          - **macOS (Intel)**: `*_x64.dmg`
+          - **Windows (x64)**: `*_x64-setup.exe`（推奨 / ユーザー領域へインストール）または `*_x64_*.msi`
+          - **Ubuntu 24.04 / 26.04 LTS (x64)**: `*_amd64.deb`（推奨 / `sudo apt install ./ファイル名.deb`）または `*_amd64.AppImage`
+
+          ### 初回起動時の注意（未署名バイナリについて）
+
+          本リリースの配布バイナリにはコード署名を付与していません。初回起動時に OS の警告が表示される場合は、次の手順で許可してください。
+
+          - **macOS**: アプリを `アプリケーション` フォルダへコピーしたあと、右クリック（Control + クリック）から「開く」を選ぶか、「システム設定 > プライバシーとセキュリティ」から起動を許可してください。起動できない場合はターミナルで `xattr -dr com.apple.quarantine /Applications/Tuck.app` を実行してください。
+          - **Windows**: SmartScreen の警告画面が表示された場合は「詳細情報」をクリックし、「実行」を選択してください。
+          - **Linux (Ubuntu)**: `.deb` を使う場合は `sudo apt install ./ダウンロードしたファイル.deb` で依存ライブラリごと導入できます。AppImage を使う場合は実行権限を付与して起動してください。
+          EOF
+          )"
+            PAYLOAD="$(jq -nc \
+              --arg tag "${TAG}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg name "Tuck ${TAG}" \
+              --arg body "${BODY}" \
+              '{tag_name: $tag, target_commitish: $commit, name: $name, body: $body, draft: true, prerelease: false}')"
+            RELEASE_ID="$(printf '%s' "${PAYLOAD}" | gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" --input - --jq '.id')"
+          fi
+
+          echo "release_id=${RELEASE_ID}" >> "${GITHUB_OUTPUT}"
+          echo "tag_name=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  build-tauri:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target_label: macos-aarch64
+            rust_target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin --bundles dmg'
+          - platform: macos-latest
+            target_label: macos-x86_64
+            rust_target: x86_64-apple-darwin
+            args: '--target x86_64-apple-darwin --bundles dmg'
+          - platform: windows-latest
+            target_label: windows-x64
+            rust_target: ''
+            args: '--bundles nsis,msi'
+          - platform: ubuntu-24.04
+            target_label: linux-x64
+            rust_target: ''
+            args: '--bundles deb,appimage'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libwayland-dev \
+            xdg-utils \
+            perl
+
+      - name: Setup Strawberry Perl on Windows
+        if: runner.os == 'Windows'
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          distribution: strawberry
+
+      - name: Setup NASM on Windows
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          prefix-key: "v0-rust-${{ matrix.target_label }}"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build and upload Tauri release assets
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_STRIP: 'true'
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tauriScript: 'bun run tauri'
+          args: ${{ matrix.args }}

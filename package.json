@@ -1,0 +1,41 @@
+{
+  "name": "tuck",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sorami-wanwan/Tuck.git"
+  },
+  "homepage": "https://github.com/sorami-wanwan/Tuck#readme",
+  "bugs": {
+    "url": "https://github.com/sorami-wanwan/Tuck/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:docker": "docker compose -f docker/compose.test.yml run --rm --build linux-test",
+    "clean:incremental": "rm -rf src-tauri/target/debug/incremental"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.14.26",
+    "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "lucide-react": "^1.75.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^5.8.0",
+    "vite": "^8.3.8"
+  }
+}

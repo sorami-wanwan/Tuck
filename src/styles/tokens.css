@@ -1,0 +1,41 @@
+:root {
+  color-scheme: dark;
+
+  --bg-canvas: #14171e;
+  --bg-panel: #1b1f27;
+  --bg-elevated: #232833;
+  --bg-input: #171a22;
+  --bg-hover: #292f3d;
+  --bg-active: #2c3547;
+  --bg-pill: #252b37;
+
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  --text-primary: #e6eaf2;
+  --text-secondary: #98a2b3;
+  --text-muted: #667085;
+
+  --accent-blue: #4c8dff;
+  --accent-blue-soft: rgba(76, 141, 255, 0.16);
+  --accent-blue-glow: rgba(76, 141, 255, 0.36);
+
+  --star-gold: #f5b942;
+  --danger: #ef5350;
+  --danger-soft: rgba(239, 83, 80, 0.15);
+  --success: #34d399;
+  --warning: #fbbf24;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --sidebar-width: 248px;
+  --inspector-width: 276px;
+  --toolbar-height: 46px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Segoe UI", "Noto Sans JP", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}

@@ -1,0 +1,223 @@
+/* Native Lightbox Dialog */
+.lightbox-dialog[open] {
+  inline-size: 100dvw;
+  block-size: 100dvh;
+  max-inline-size: 100dvw;
+  max-block-size: 100dvh;
+  margin: 0;
+  background: transparent;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.lightbox-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+.lightbox-hud {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(16, 19, 25, 0.78);
+  border-block-end: 1px solid var(--border-subtle);
+  z-index: 2;
+}
+
+.lightbox-hud-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+}
+
+.lightbox-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lightbox-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lightbox-viewport {
+  position: relative;
+  flex: 1 1 0;
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px 56px;
+  cursor: default;
+  touch-action: manipulation;
+}
+
+.lightbox-viewport.image-mode {
+  touch-action: none;
+}
+
+.lightbox-viewport.pannable {
+  cursor: grab;
+}
+
+.lightbox-viewport.dragging {
+  cursor: grabbing;
+}
+
+.physics-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transform-origin: center center;
+}
+
+.lightbox-image {
+  display: block;
+  flex-shrink: 0;
+  max-inline-size: none;
+  max-block-size: none;
+  object-fit: contain;
+}
+
+.lightbox-video {
+  display: block;
+  max-inline-size: 100%;
+  max-block-size: 100%;
+  inline-size: auto;
+  block-size: auto;
+  border-radius: var(--radius-md);
+  background: #000000;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  outline: none;
+}
+
+.lightbox-nav-btn {
+  position: absolute;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  inline-size: 40px;
+  block-size: 56px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: rgba(20, 23, 30, 0.72);
+  color: var(--text-primary);
+}
+
+.lightbox-nav-btn:hover:not(:disabled) {
+  background: rgba(44, 53, 71, 0.9);
+}
+
+.lightbox-nav-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.lightbox-nav-btn.prev {
+  inset-inline-start: 14px;
+}
+
+.lightbox-nav-btn.next {
+  inset-inline-end: 14px;
+}
+
+.lightbox-drawer {
+  inline-size: var(--inspector-width);
+  block-size: 100dvh;
+  background: var(--bg-panel);
+  border-inline-start: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+
+/* Manga Reader Dialog */
+.manga-reader-dialog[open] {
+  inline-size: 100dvw;
+  block-size: 100dvh;
+  max-inline-size: 100dvw;
+  max-block-size: 100dvh;
+  margin: 0;
+  background: rgba(10, 12, 17, 0.96);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.reader-main {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+.spread-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  flex-shrink: 0;
+  transform-origin: center center;
+}
+
+.spread-page-img {
+  display: block;
+  flex-shrink: 0;
+  max-inline-size: none;
+  max-block-size: none;
+  object-fit: contain;
+}
+
+.reader-scrubber {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(16, 19, 25, 0.82);
+  border-block-start: 1px solid var(--border-subtle);
+}
+
+.reader-scrubber input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.mode-pill-group {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  gap: 2px;
+}
+
+.mode-pill-btn {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.mode-pill-btn.active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+

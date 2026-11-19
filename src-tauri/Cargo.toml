@@ -1,0 +1,62 @@
+[package]
+name = "tuck"
+version = "0.1.0"
+description = "Tuck - Offline encrypted media & manga organizer"
+license = "MIT"
+repository = "https://github.com/sorami-wanwan/Tuck"
+homepage = "https://github.com/sorami-wanwan/Tuck"
+edition = "2021"
+
+[lib]
+name = "tuck_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+rusqlite = { version = "0.43", features = ["bundled-sqlcipher-vendored-openssl"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+webp = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1", features = ["derive"] }
+arboard = "3"
+unicode-normalization = "0.1"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+bytes = "1"
+getrandom = "0.3"
+if-addrs = "0.13"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

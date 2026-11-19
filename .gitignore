@@ -1,0 +1,19 @@
+# Dependencies & build outputs
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Vault & package data files (never commit user/test vaults)
+*.vault
+*.vault-journal
+*.vault-wal
+*.vault-shm
+*.tuckpack
+*.kvpack
+
+# OS & logs
+.DS_Store
+*.log
+.env
+.env.*
