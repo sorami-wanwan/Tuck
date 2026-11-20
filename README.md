@@ -215,6 +215,7 @@ bun run test:docker
 
 ## ドキュメントとライセンス
 
+- 変更履歴: [CHANGELOG.md](CHANGELOG.md)
 - セキュリティ設計・脆弱性の報告手順: [SECURITY.md](SECURITY.md)
 - コントリビュート方法: [CONTRIBUTING.md](CONTRIBUTING.md)
 - ライセンス: [MIT License](LICENSE)

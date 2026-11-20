@@ -18,6 +18,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify version consistency
+        run: |
+          TAURI_VER="$(jq -r .version src-tauri/tauri.conf.json)"
+          PKG_VER="$(jq -r .version package.json)"
+          CARGO_VER="$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"])')"
+
+          echo "tauri.conf.json: ${TAURI_VER}"
+          echo "package.json:    ${PKG_VER}"
+          echo "Cargo.toml:      ${CARGO_VER}"
+
+          if [ "${TAURI_VER}" != "${PKG_VER}" ] || [ "${TAURI_VER}" != "${CARGO_VER}" ]; then
+            echo "::error::Version mismatch across tauri.conf.json (${TAURI_VER}), package.json (${PKG_VER}), and Cargo.toml (${CARGO_VER})"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ] && [ "${GITHUB_REF_NAME}" != "v${TAURI_VER}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match app version v${TAURI_VER}"
+            exit 1
+          fi
+
       - name: Prepare draft GitHub release
         id: prepare
         env:
@@ -30,31 +50,27 @@ jobs:
             TAG="v${VERSION}"
           fi
 
-          EXISTING_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1 || true)"
+          BODY="$(python3 .github/scripts/render_release_notes.py \
+            --changelog CHANGELOG.md \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}")"
 
-          if [ -n "${EXISTING_ID}" ]; then
-            RELEASE_ID="${EXISTING_ID}"
+          EXISTING_LINE="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\(.id)\t\(.draft)\"" | head -n 1 || true)"
+
+          if [ -n "${EXISTING_LINE}" ]; then
+            RELEASE_ID="$(printf '%s' "${EXISTING_LINE}" | cut -f1)"
+            IS_DRAFT="$(printf '%s' "${EXISTING_LINE}" | cut -f2)"
+            if [ "${IS_DRAFT}" = "true" ]; then
+              PAYLOAD="$(jq -nc \
+                --arg commit "${GITHUB_SHA}" \
+                --arg name "Tuck ${TAG}" \
+                --arg body "${BODY}" \
+                '{target_commitish: $commit, name: $name, body: $body}')"
+              printf '%s' "${PAYLOAD}" | gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --input - > /dev/null
+            fi
           else
-            BODY="$(cat <<'EOF'
-          ## Tuck 配布ファイル一覧
-
-          お使いの OS に合わせてインストーラまたはパッケージをダウンロードしてください。
-
-          - **macOS (Apple Silicon / M1〜M4)**: `*_aarch64.dmg`
-          - **macOS (Intel)**: `*_x64.dmg`
-          - **Windows (x64)**: `*_x64-setup.exe`（推奨 / ユーザー領域へインストール）または `*_x64_*.msi`
-          - **Ubuntu 24.04 / 26.04 LTS (x64)**: `*_amd64.deb`（推奨 / `sudo apt install ./ファイル名.deb`）または `*_amd64.AppImage`
-
-          ### 初回起動時の注意（未署名バイナリについて）
-
-          本リリースの配布バイナリにはコード署名を付与していません。初回起動時に OS の警告が表示される場合は、次の手順で許可してください。
-
-          - **macOS**: アプリを `アプリケーション` フォルダへコピーしたあと、右クリック（Control + クリック）から「開く」を選ぶか、「システム設定 > プライバシーとセキュリティ」から起動を許可してください。起動できない場合はターミナルで `xattr -dr com.apple.quarantine /Applications/Tuck.app` を実行してください。
-          - **Windows**: SmartScreen の警告画面が表示された場合は「詳細情報」をクリックし、「実行」を選択してください。
-          - **Linux (Ubuntu)**: `.deb` を使う場合は `sudo apt install ./ダウンロードしたファイル.deb` で依存ライブラリごと導入できます。AppImage を使う場合は実行権限を付与して起動してください。
-          EOF
-          )"
             PAYLOAD="$(jq -nc \
               --arg tag "${TAG}" \
               --arg commit "${GITHUB_SHA}" \
