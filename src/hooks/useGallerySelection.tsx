@@ -28,6 +28,7 @@ import type { ContextMenuItem } from "../components/ContextMenu";
 import { imageMemoryCache } from "../services/imageCache";
 import { formatErrorMessage, vaultApi } from "../services/vaultApi";
 import { summarizeSelectionRating } from "../utils/bulkRating";
+import { sortImagesOldestFirst } from "../utils/groupOrder";
 import {
   entryKey,
   isVideoMime,
@@ -282,9 +283,7 @@ export function useGallerySelection({
   );
 
   const handleCreateGroupFromSelection = useCallback(async () => {
-    const itemIds = selectedEntriesMeta
-      .filter((e) => e.kind === "image" && !isVideoMime(e.coverMimeType))
-      .map((e) => e.id);
+    const itemIds = sortImagesOldestFirst(selectedEntriesMeta).map((e) => e.id);
     if (itemIds.length < 2) return;
     try {
       const created = await vaultApi.createGroupFromItems(itemIds, null, currentFolderId);

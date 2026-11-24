@@ -404,7 +404,8 @@ impl VaultDb {
         let pages: Vec<GroupPage> = {
             let mut stmt = self.conn.prepare(
                 "SELECT i.id, gi.page_order, i.title, i.mime_type, i.width, i.height, i.byte_size,
-                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = i.id)
+                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = i.id),
+                        i.created_at
                  FROM group_items gi
                  JOIN items i ON i.id = gi.item_id
                  WHERE gi.group_id = ?1
@@ -420,6 +421,7 @@ impl VaultDb {
                     height: r.get(5)?,
                     byte_size: r.get(6)?,
                     has_thumbnail: r.get::<_, i64>(7)? != 0,
+                    created_at: r.get(8)?,
                 })
             })?;
             let mut out = Vec::new();

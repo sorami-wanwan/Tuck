@@ -195,7 +195,8 @@
   .lightbox-nav-btn,
   .reader-scrubber,
   .star-btn,
-  .star-clear-btn {
+  .star-clear-btn,
+  .page-editor-card {
     transition: none;
   }
 }
@@ -213,6 +214,11 @@
   .mode-pill-btn {
     min-inline-size: var(--target-size);
     min-block-size: var(--target-size);
+  }
+
+  .page-drag-handle {
+    min-inline-size: 32px;
+    min-block-size: 32px;
   }
 
   .multi-rating-panel .star-btn,

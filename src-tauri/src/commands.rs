@@ -262,7 +262,9 @@ pub async fn import_paths(
     let report = run_blocking(move || {
         with_open_db(&db_arc, |db| {
             let mut report = ImportReport::default();
-            for raw_path in paths {
+            let mut sorted_paths = paths;
+            sorted_paths.sort_by(|a, b| natural_cmp(a, b));
+            for raw_path in sorted_paths {
                 let p = Path::new(&raw_path);
                 if p.is_dir() {
                     let mut files: Vec<PathBuf> = WalkDir::new(p)

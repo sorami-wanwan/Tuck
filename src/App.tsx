@@ -29,6 +29,7 @@ import { useToasts } from "./hooks/useToasts";
 import { useVaultSession } from "./hooks/useVaultSession";
 import { imageMemoryCache } from "./services/imageCache";
 import { formatErrorMessage, vaultApi } from "./services/vaultApi";
+import { sortImagesOldestFirst } from "./utils/groupOrder";
 import {
   entryKey,
   type EntryRef,
@@ -475,10 +476,29 @@ export function App() {
         .catch((err) => pushToast("error", formatErrorMessage(err)));
     },
     onDropImagesToGroup: (itemIds, groupId) => {
+      const entryById = new Map<string, GalleryEntry>();
+      for (const entry of entries) {
+        if (entry.kind === "image") {
+          entryById.set(entry.id, entry);
+        }
+      }
+      const resolvedEntries: GalleryEntry[] = [];
+      const fallbackIds: string[] = [];
+      for (const id of itemIds) {
+        const found = entryById.get(id);
+        if (found) resolvedEntries.push(found);
+        else fallbackIds.push(id);
+      }
+      const orderedIds = [
+        ...sortImagesOldestFirst(resolvedEntries).map((e) => e.id),
+        ...fallbackIds,
+      ];
+      if (orderedIds.length === 0) return;
+
       void vaultApi
-        .addItemsToGroup(groupId, itemIds)
+        .addItemsToGroup(groupId, orderedIds)
         .then(() => {
-          pushToast("success", `${itemIds.length}枚を漫画グループへ追加しました`);
+          pushToast("success", `${orderedIds.length}枚を漫画グループへ追加しました`);
           return refreshLibrary();
         })
         .catch((err) => pushToast("error", formatErrorMessage(err)));
@@ -1124,10 +1144,15 @@ export function App() {
         group={gallery.activeModalGroup}
         onClose={() => gallery.setEditorGroupId(null)}
         onReorder={async (gid, orderedIds) => {
-          const updated = await vaultApi.reorderGroupPages(gid, orderedIds);
-          gallery.setActiveModalGroup(updated);
-          if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-          await refreshLibrary();
+          try {
+            const updated = await vaultApi.reorderGroupPages(gid, orderedIds);
+            gallery.setActiveModalGroup(updated);
+            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
+            await refreshLibrary();
+          } catch (err) {
+            pushToast("error", formatErrorMessage(err));
+            throw err;
+          }
         }}
         onRemovePage={async (gid, itemId) => {
           const next = await vaultApi.removePageFromGroup(gid, itemId);

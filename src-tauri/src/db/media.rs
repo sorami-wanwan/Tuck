@@ -69,7 +69,7 @@ impl VaultDb {
 
         let processed = process_image_bytes(bytes)?;
         let id = Uuid::new_v4().to_string();
-        let now = now_ms();
+        let now = self.next_item_created_at();
         let title = default_title.map(normalize_nfc_trimmed).unwrap_or_default();
         let palette_json =
             serde_json::to_string(&processed.palette).unwrap_or_else(|_| "[]".to_string());
@@ -189,7 +189,7 @@ impl VaultDb {
 
         let effective_chunk_size = chunk_size.max(4096);
         let id = Uuid::new_v4().to_string();
-        let now = now_ms();
+        let now = self.next_item_created_at();
         let title = default_title.map(normalize_nfc_trimmed).unwrap_or_default();
         let safe_duration = duration_ms.max(0);
 

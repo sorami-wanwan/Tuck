@@ -177,6 +177,7 @@ export interface GroupPage {
   height: number;
   byteSize: number;
   hasThumbnail: boolean;
+  createdAt: number;
 }
 
 export interface GroupDetail {

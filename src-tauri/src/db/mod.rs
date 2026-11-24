@@ -51,6 +51,7 @@ pub enum ImportOutcome {
 pub struct VaultDb {
     conn: Connection,
     path: PathBuf,
+    last_item_created_at: i64,
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -174,6 +175,7 @@ impl VaultDb {
             Ok(Self {
                 conn,
                 path: path.to_path_buf(),
+                last_item_created_at: 0,
             })
         })();
 
@@ -247,10 +249,28 @@ impl VaultDb {
             _ => return Err(VaultError::WrongPassword),
         }
 
+        let last_item_created_at: i64 =
+            conn.query_row("SELECT COALESCE(MAX(created_at), 0) FROM items", [], |r| {
+                r.get(0)
+            })?;
+
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            last_item_created_at,
         })
+    }
+
+    /// Returns a strictly monotonic timestamp in ms for new item inserts so bulk imports keep deterministic order.
+    pub(super) fn next_item_created_at(&mut self) -> i64 {
+        let now = now_ms();
+        let next = if now <= self.last_item_created_at {
+            self.last_item_created_at + 1
+        } else {
+            now
+        };
+        self.last_item_created_at = next;
+        next
     }
 
     pub fn path(&self) -> &Path {

@@ -228,13 +228,29 @@
   overflow: hidden;
 }
 
+.group-editor-dialog.is-reordering,
+.group-editor-dialog.is-reordering * {
+  cursor: grabbing !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .group-editor-header {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
   padding: 14px 18px;
   border-block-end: 1px solid var(--border-subtle);
+}
+
+.group-editor-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 0;
 }
 
 .group-editor-header h2 {
@@ -242,12 +258,24 @@
   font-size: 15px;
 }
 
+.group-editor-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.group-editor-header .btn.active {
+  border-color: var(--accent-blue);
+  background: var(--accent-blue-soft);
+}
+
 .group-editor-grid {
+  position: relative;
   flex: 1 1 0;
   min-block-size: 0;
   overflow-y: auto;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
+  scroll-behavior: auto;
   align-content: start;
   padding: 16px;
   display: grid;
@@ -263,6 +291,17 @@
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
+  transition: border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.page-editor-card:hover {
+  border-color: var(--border-strong);
+}
+
+.page-editor-card.is-dragging-source {
+  opacity: 0.35;
+  border-style: dashed;
+  border-color: var(--accent-blue);
 }
 
 .page-editor-thumb {
@@ -273,6 +312,7 @@
   overflow: hidden;
   display: grid;
   place-items: center;
+  cursor: grab;
 }
 
 .page-editor-thumb img {
@@ -281,11 +321,106 @@
   object-fit: contain;
 }
 
+.page-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  flex-shrink: 0;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.page-drag-handle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
 .page-editor-controls {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+}
+
+.page-drop-indicator {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  inline-size: 3px;
+  border-radius: 999px;
+  background: var(--accent-blue);
+  box-shadow: 0 0 10px var(--accent-blue-glow);
+  transform: translateX(-50%);
+}
+
+.page-drop-indicator::before,
+.page-drop-indicator::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inline-size: 8px;
+  block-size: 8px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  border: 1.5px solid var(--bg-panel);
+  transform: translateX(-50%);
+}
+
+.page-drop-indicator::before {
+  inset-block-start: -4px;
+}
+
+.page-drop-indicator::after {
+  inset-block-end: -4px;
+}
+
+.page-drag-preview {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  border-radius: var(--radius-md);
+  background: rgba(27, 31, 39, 0.94);
+  border: 1px solid var(--accent-blue);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.65);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.page-drag-preview-thumb {
+  inline-size: 34px;
+  block-size: 46px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #101319;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.page-drag-preview-thumb img {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+}
+
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Phase 3: Maintenance, Backup & Partial Package Dialog */

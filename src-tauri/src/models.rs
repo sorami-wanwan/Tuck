@@ -180,6 +180,7 @@ pub struct GroupPage {
     pub height: i32,
     pub byte_size: i64,
     pub has_thumbnail: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

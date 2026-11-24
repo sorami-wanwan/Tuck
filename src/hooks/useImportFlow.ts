@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { imageMemoryCache } from "../services/imageCache";
 import { formatErrorMessage, vaultApi } from "../services/vaultApi";
 import { entryKey, type ImportReport, type ToastItem } from "../types/vault";
+import { compareNamesNatural } from "../utils/groupOrder";
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -124,7 +125,8 @@ export function useImportFlow({
         skippedUnsupportedCount: 0,
         errors: [],
       };
-      for (const file of files) {
+      const sortedFiles = [...files].sort((a, b) => compareNamesNatural(a.name, b.name));
+      for (const file of sortedFiles) {
         const title = file.name ? file.name.replace(/\.[^.]+$/, "") : undefined;
         try {
           const rep = await vaultApi.importBytes(file, title, folderId);

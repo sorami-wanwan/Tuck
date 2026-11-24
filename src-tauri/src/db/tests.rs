@@ -1423,3 +1423,76 @@ fn test_batch_set_entry_rating_mixed_idempotent_and_guards() {
     assert_eq!(r_empty.target_count, 0);
     assert_eq!(r_empty.updated_count, 0);
 }
+
+#[test]
+fn test_monotonic_import_created_at_and_group_page_created_at() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("monotonic.vault");
+
+    let t3;
+    let id1;
+    let id2;
+    let id3;
+    let id4;
+
+    {
+        let mut db = VaultDb::create(&vault_path, "pass1234", false).unwrap();
+        id1 = import_id(
+            &mut db,
+            &make_png_bytes(40, 40, 10, 20, 30, 255),
+            Some("page-1"),
+        );
+        id2 = import_id(
+            &mut db,
+            &make_png_bytes(40, 40, 50, 20, 30, 255),
+            Some("page-2"),
+        );
+        id3 = import_id(
+            &mut db,
+            &make_png_bytes(40, 40, 90, 20, 30, 255),
+            Some("page-3"),
+        );
+        id4 = match db
+            .import_bytes(&make_minimal_avif_bytes(), Some("page-4"))
+            .unwrap()
+        {
+            ImportOutcome::Imported { id, .. } => id,
+            ImportOutcome::Duplicate => panic!("unexpected duplicate"),
+        };
+
+        let d1 = db.get_item_detail(&id1).unwrap().created_at;
+        let d2 = db.get_item_detail(&id2).unwrap().created_at;
+        let d3 = db.get_item_detail(&id3).unwrap().created_at;
+        let d4 = db.get_item_detail(&id4).unwrap().created_at;
+        assert!(d1 < d2 && d2 < d3 && d3 < d4);
+        t3 = d4;
+
+        let group = db
+            .create_group_from_items(
+                &[id1.clone(), id2.clone(), id3.clone()],
+                Some("第1話"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            group
+                .pages
+                .iter()
+                .map(|p| p.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![id1.as_str(), id2.as_str(), id3.as_str()]
+        );
+        assert_eq!(group.pages[0].created_at, d1);
+        assert_eq!(group.pages[1].created_at, d2);
+        assert_eq!(group.pages[2].created_at, d3);
+    }
+
+    let mut reopened = VaultDb::open(&vault_path, "pass1234").unwrap();
+    let id5 = import_id(
+        &mut reopened,
+        &make_png_bytes(40, 40, 130, 20, 30, 255),
+        Some("page-5"),
+    );
+    let d5 = reopened.get_item_detail(&id5).unwrap().created_at;
+    assert!(d5 > t3);
+}
