@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -6,6 +7,7 @@ use axum::http::header::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use serde::Deserialize;
 
@@ -13,11 +15,13 @@ use crate::commands::percent_decode;
 use crate::db::ImportOutcome;
 use crate::error::VaultError;
 use crate::imaging::is_video_mime;
-use crate::models::{EntryKind, EntryRef, ImportReport};
+use crate::models::{EntryKind, EntryRef, ImportReport, LanAccessMode};
 use crate::state::AppState;
 use crate::ytdlp;
 
-use super::auth::{error_response, notify_changed, require_write_checked, run_db};
+use super::auth::{
+    error_response, notify_changed, require_write_checked, require_write_session_no_csrf, run_db,
+};
 use super::{
     EphemeralUploadFile, LanApiError, LanServerRuntime, LanSseEvent, DEFAULT_UPLOAD_LIMIT_MB,
     MAX_THUMBNAIL_UPLOAD_BYTES, STREAM_RAM_BUFFER_THRESHOLD,
@@ -131,8 +135,7 @@ pub(super) async fn handle_remove_item_tag(
     AxumPath((id, tag)): AxumPath<(String, String)>,
 ) -> Result<Response, LanApiError> {
     require_write_checked(&runtime, &headers)?;
-    let decoded_tag = percent_decode(&tag);
-    let res = run_db(&runtime, move |db| db.remove_tag(&id, &decoded_tag)).await?;
+    let res = run_db(&runtime, move |db| db.remove_tag(&id, &tag)).await?;
     notify_changed(&runtime);
     Ok(Json(res).into_response())
 }
@@ -482,8 +485,7 @@ pub(super) async fn handle_remove_group_tag(
     AxumPath((id, tag)): AxumPath<(String, String)>,
 ) -> Result<Response, LanApiError> {
     require_write_checked(&runtime, &headers)?;
-    let decoded_tag = percent_decode(&tag);
-    let res = run_db(&runtime, move |db| db.remove_group_tag(&id, &decoded_tag)).await?;
+    let res = run_db(&runtime, move |db| db.remove_group_tag(&id, &tag)).await?;
     notify_changed(&runtime);
     Ok(Json(res).into_response())
 }
@@ -519,12 +521,11 @@ pub(super) async fn handle_trash_delete(
     Json(body): Json<EntriesBody>,
 ) -> Result<Response, LanApiError> {
     require_write_checked(&runtime, &headers)?;
-    let ids: Vec<String> = body.entries.iter().map(|e| e.id.clone()).collect();
-    let count = run_db(&runtime, move |db| {
-        db.permanently_delete_entries(&body.entries)
+    let (count, deleted_item_ids) = run_db(&runtime, move |db| {
+        db.permanently_delete_entries_detailed(&body.entries)
     })
     .await?;
-    runtime.app_state.invalidate_media_items(&ids);
+    runtime.app_state.invalidate_media_items(&deleted_item_ids);
     notify_changed(&runtime);
     Ok(Json(count).into_response())
 }
@@ -538,6 +539,11 @@ pub(super) async fn handle_trash_empty(
     runtime.app_state.clear_media_cache();
     notify_changed(&runtime);
     Ok(Json(count).into_response())
+}
+
+enum UploadStreamOp {
+    Chunk(Bytes),
+    Commit,
 }
 
 pub(super) async fn handle_import_bytes(
@@ -571,56 +577,124 @@ pub(super) async fn handle_import_bytes(
 
     let mut stream = body.into_data_stream();
     let mut ram_buf: Vec<u8> = Vec::new();
-    let mut temp_file: Option<EphemeralUploadFile> = None;
+    let mut upload_tx: Option<tokio::sync::mpsc::Sender<UploadStreamOp>> = None;
+    let mut writer_handle: Option<
+        tokio::task::JoinHandle<Result<Option<EphemeralUploadFile>, VaultError>>,
+    > = None;
     let mut total_bytes: usize = 0;
 
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.map_err(|e| {
-            error_response(VaultError::InvalidInput(format!(
-                "アップロード受信中にエラーが発生しました: {e}"
-            )))
-        })?;
-        total_bytes = total_bytes.checked_add(chunk.len()).ok_or_else(|| {
-            error_response(VaultError::InvalidInput(
-                "ファイルサイズ上限を超えています".to_string(),
-            ))
-        })?;
-        if total_bytes > max_bytes {
-            return Err(VaultError::InvalidInput(format!(
-                "アップロードサイズが上限 ({limit_mb} MB) を超えています"
+    let stream_res: Result<(), LanApiError> = async {
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res.map_err(|e| {
+                error_response(VaultError::InvalidInput(format!(
+                    "アップロード受信中にエラーが発生しました: {e}"
+                )))
+            })?;
+            total_bytes = total_bytes.checked_add(chunk.len()).ok_or_else(|| {
+                error_response(VaultError::InvalidInput(
+                    "ファイルサイズ上限を超えています".to_string(),
+                ))
+            })?;
+            if total_bytes > max_bytes {
+                return Err(VaultError::InvalidInput(format!(
+                    "アップロードサイズが上限 ({limit_mb} MB) を超えています"
+                ))
+                .into());
+            }
+
+            if let Some(tx) = upload_tx.as_ref() {
+                if !chunk.is_empty() && tx.send(UploadStreamOp::Chunk(chunk)).await.is_err() {
+                    return Err(VaultError::Io(std::io::Error::other(
+                        "一時ファイルの書き込みに失敗しました",
+                    ))
+                    .into());
+                }
+            } else if ram_buf.len() + chunk.len() > STREAM_RAM_BUFFER_THRESHOLD {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<UploadStreamOp>(4);
+                let handle = tokio::task::spawn_blocking(
+                    move || -> Result<Option<EphemeralUploadFile>, VaultError> {
+                        let mut tf = EphemeralUploadFile::create()?;
+                        while let Some(op) = rx.blocking_recv() {
+                            match op {
+                                UploadStreamOp::Chunk(data) => {
+                                    tf.write_all(&data)?;
+                                }
+                                UploadStreamOp::Commit => {
+                                    tf.finish_writing()?;
+                                    return Ok(Some(tf));
+                                }
+                            }
+                        }
+                        Ok(None)
+                    },
+                );
+                if !ram_buf.is_empty() {
+                    let initial = Bytes::from(std::mem::take(&mut ram_buf));
+                    ram_buf.shrink_to_fit();
+                    if tx.send(UploadStreamOp::Chunk(initial)).await.is_err() {
+                        let _ = handle.await;
+                        return Err(VaultError::Io(std::io::Error::other(
+                            "一時ファイルの書き込みに失敗しました",
+                        ))
+                        .into());
+                    }
+                }
+                if !chunk.is_empty() && tx.send(UploadStreamOp::Chunk(chunk)).await.is_err() {
+                    let _ = handle.await;
+                    return Err(VaultError::Io(std::io::Error::other(
+                        "一時ファイルの書き込みに失敗しました",
+                    ))
+                    .into());
+                }
+                upload_tx = Some(tx);
+                writer_handle = Some(handle);
+            } else {
+                ram_buf.extend_from_slice(&chunk);
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(err) = stream_res {
+        drop(upload_tx);
+        if let Some(handle) = writer_handle {
+            let _ = handle.await;
+        }
+        return Err(err);
+    }
+
+    let temp_file = if let (Some(tx), Some(handle)) = (upload_tx, writer_handle) {
+        if tx.send(UploadStreamOp::Commit).await.is_err() {
+            drop(tx);
+            let res = handle
+                .await
+                .map_err(|e| error_response(VaultError::LanShare(e.to_string())))?;
+            res?;
+            return Err(VaultError::Io(std::io::Error::other(
+                "一時ファイルの確定に失敗しました",
             ))
             .into());
         }
+        drop(tx);
+        handle
+            .await
+            .map_err(|e| error_response(VaultError::LanShare(e.to_string())))??
+    } else {
+        None
+    };
 
-        if let Some(tf) = temp_file.as_mut() {
-            tf.write_all(&chunk)
-                .map_err(|e| error_response(VaultError::Io(e)))?;
-        } else if ram_buf.len() + chunk.len() > STREAM_RAM_BUFFER_THRESHOLD {
-            let mut tf =
-                EphemeralUploadFile::create().map_err(|e| error_response(VaultError::Io(e)))?;
-            if !ram_buf.is_empty() {
-                tf.write_all(&ram_buf)
-                    .map_err(|e| error_response(VaultError::Io(e)))?;
-                ram_buf.clear();
-                ram_buf.shrink_to_fit();
-            }
-            tf.write_all(&chunk)
-                .map_err(|e| error_response(VaultError::Io(e)))?;
-            temp_file = Some(tf);
-        } else {
-            ram_buf.extend_from_slice(&chunk);
+    if let Err(err) = require_write_checked(&runtime, &headers) {
+        if let Some(tf) = temp_file {
+            let _ = tokio::task::spawn_blocking(move || drop(tf)).await;
         }
+        return Err(err);
     }
 
-    if let Some(tf) = temp_file.as_mut() {
-        tf.finish_writing()
-            .map_err(|e| error_response(VaultError::Io(e)))?;
-    }
-
-    let report = run_db(&runtime, move |db| {
-        let _temp_guard = temp_file;
-        let outcome = if let Some(ref tf) = _temp_guard {
-            db.import_media_file(tf.path(), title.as_deref(), None, 0)
+    let temp_path: Option<PathBuf> = temp_file.as_ref().map(|tf| tf.path().to_path_buf());
+    let db_res = run_db(&runtime, move |db| {
+        let outcome = if let Some(ref tp) = temp_path {
+            db.import_media_file(tp, title.as_deref(), None, 0)
         } else {
             db.import_media_bytes(&ram_buf, title.as_deref(), None, 0)
         };
@@ -657,7 +731,12 @@ pub(super) async fn handle_import_bytes(
         }
         Ok(report)
     })
-    .await?;
+    .await;
+
+    if let Some(tf) = temp_file {
+        let _ = tokio::task::spawn_blocking(move || drop(tf)).await;
+    }
+    let report = db_res?;
 
     if !report.imported_ids.is_empty() {
         notify_changed(&runtime);
@@ -669,7 +748,7 @@ pub(super) async fn handle_check_ytdlp_status(
     State(runtime): State<Arc<LanServerRuntime>>,
     headers: HeaderMap,
 ) -> Result<Response, LanApiError> {
-    require_write_checked(&runtime, &headers)?;
+    require_write_session_no_csrf(&runtime, &headers)?;
     let url_settings = run_db(&runtime, |db| Ok(db.get_url_import_settings())).await?;
     let mut st = tokio::task::spawn_blocking(move || {
         ytdlp::check_ytdlp_status(&url_settings.ytdlp_path, &url_settings.ffmpeg_path)
@@ -727,6 +806,16 @@ pub(super) async fn handle_import_url(
                 .events_tx
                 .send(LanSseEvent::UrlImportProgress { payload: ev });
         })?;
+
+        {
+            let store = rt_clone.store_read();
+            if !store.running {
+                return Err(VaultError::LanUnauthorized);
+            }
+            if store.mode != LanAccessMode::ReadWrite {
+                return Err(VaultError::LanReadOnly);
+            }
+        }
 
         let mut db_guard = rt_clone.app_state.lock_db()?;
         let db = db_guard.as_mut().ok_or(VaultError::VaultNotOpen)?;

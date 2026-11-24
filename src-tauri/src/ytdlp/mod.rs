@@ -17,7 +17,7 @@ use crate::models::{EntryKind, EntryRef, ImportReport, UrlImportProgressEvent};
 pub use binary::check_ytdlp_status;
 pub use download::download_from_url;
 
-pub(super) const MEMORY_PIPE_MAX_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const MEMORY_PIPE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const META_TIMEOUT_SECS: u64 = 60;
 pub(super) const DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 1800;
 pub(super) const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 120;

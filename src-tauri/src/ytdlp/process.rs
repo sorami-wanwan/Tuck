@@ -237,6 +237,57 @@ pub(super) struct MonitorOptions<'a> {
     pub(super) item_total_hint: Option<usize>,
 }
 
+pub(super) fn configure_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+fn kill_and_cleanup(
+    child: &mut Child,
+    rx: mpsc::Receiver<ChildStreamMsg>,
+    h1: thread::JoinHandle<()>,
+    h2: thread::JoinHandle<()>,
+) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(rx);
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while (!h1.is_finished() || !h2.is_finished()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if h1.is_finished() {
+        let _ = h1.join();
+    }
+    if h2.is_finished() {
+        let _ = h2.join();
+    }
+}
+
 pub(super) fn run_child_monitored<F>(
     mut child: Child,
     opts: MonitorOptions<'_>,
@@ -269,25 +320,22 @@ where
     let mut last_activity = Instant::now();
     let mut last_dir_check = Instant::now();
 
-    let kill_and_cleanup =
-        |child: &mut Child, h1: thread::JoinHandle<()>, h2: thread::JoinHandle<()>| {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = h1.join();
-            let _ = h2.join();
-        };
-
     while !stdout_done || !stderr_done {
         if opts.cancel.load(Ordering::SeqCst) {
-            kill_and_cleanup(&mut child, h_out, h_err);
+            kill_and_cleanup(&mut child, rx, h_out, h_err);
             return Err(ChildRunFailure::Cancelled);
+        }
+
+        if started.elapsed() > opts.total_timeout {
+            kill_and_cleanup(&mut child, rx, h_out, h_err);
+            return Err(ChildRunFailure::TotalTimeout);
         }
 
         if let Some((dir, limit_bytes)) = opts.staging_watch {
             if last_dir_check.elapsed() >= Duration::from_secs(1) {
                 last_dir_check = Instant::now();
                 if dir_size_bytes(dir) > limit_bytes {
-                    kill_and_cleanup(&mut child, h_out, h_err);
+                    kill_and_cleanup(&mut child, rx, h_out, h_err);
                     return Err(ChildRunFailure::StagingLimitExceeded);
                 }
             }
@@ -298,7 +346,7 @@ where
                 last_activity = Instant::now();
                 if opts.capture_stdout {
                     if stdout_buf.len().saturating_add(chunk.len()) > opts.stdout_cap {
-                        kill_and_cleanup(&mut child, h_out, h_err);
+                        kill_and_cleanup(&mut child, rx, h_out, h_err);
                         return Err(ChildRunFailure::MemoryLimitExceeded);
                     }
                     stdout_buf.extend_from_slice(&chunk);
@@ -320,12 +368,8 @@ where
             Ok(ChildStreamMsg::StdoutDone) => stdout_done = true,
             Ok(ChildStreamMsg::StderrDone) => stderr_done = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if started.elapsed() > opts.total_timeout {
-                    kill_and_cleanup(&mut child, h_out, h_err);
-                    return Err(ChildRunFailure::TotalTimeout);
-                }
                 if last_activity.elapsed() > opts.stall_timeout {
-                    kill_and_cleanup(&mut child, h_out, h_err);
+                    kill_and_cleanup(&mut child, rx, h_out, h_err);
                     return Err(ChildRunFailure::StallTimeout);
                 }
             }
@@ -359,11 +403,18 @@ where
 
 pub(super) fn extract_ytdlp_error_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
+    let is_diagnostic_line = |l: &&str| {
+        let trimmed = l.trim();
+        !trimmed.is_empty()
+            && !trimmed.starts_with("TUCK_PROG|")
+            && !trimmed.starts_with("TUCK_PP|")
+    };
     let last_err = text
         .lines()
         .rev()
+        .filter(is_diagnostic_line)
         .find(|l| l.contains("ERROR:"))
-        .or_else(|| text.lines().rev().find(|l| !l.trim().is_empty()))
+        .or_else(|| text.lines().rev().find(is_diagnostic_line))
         .unwrap_or("動画を取得できませんでした");
     let cleaned = last_err
         .trim()

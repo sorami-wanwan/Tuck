@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, Read};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -9,8 +9,8 @@ use zeroize::Zeroizing;
 
 use crate::error::VaultError;
 
-/// Applies the SQLCipher passphrase inside a zeroizing buffer before any other PRAGMA.
-pub fn apply_sqlcipher_key(conn: &Connection, passphrase: &str) -> Result<(), VaultError> {
+/// Validates a vault or package passphrase before touching disk.
+pub fn validate_passphrase(passphrase: &str) -> Result<(), VaultError> {
     if passphrase.is_empty() {
         return Err(VaultError::InvalidPassphrase(
             "パスワードを入力してください".to_string(),
@@ -21,12 +21,20 @@ pub fn apply_sqlcipher_key(conn: &Connection, passphrase: &str) -> Result<(), Va
             "パスワードに使用できない文字が含まれています".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Applies the SQLCipher passphrase inside a zeroizing buffer before any other PRAGMA.
+pub fn apply_sqlcipher_key(conn: &Connection, passphrase: &str) -> Result<(), VaultError> {
+    validate_passphrase(passphrase)?;
 
     let escaped = Zeroizing::new(passphrase.replace('\'', "''"));
     let pragma = Zeroizing::new(format!("PRAGMA key = '{}';", *escaped));
     drop(escaped);
 
-    conn.execute_batch(&pragma)?;
+    conn.execute_batch(&pragma).map_err(|_| {
+        VaultError::InvalidPassphrase("暗号鍵の適用に失敗しました".to_string())
+    })?;
     drop(pragma);
 
     conn.execute_batch("PRAGMA cipher_compatibility = 4;")?;
@@ -40,16 +48,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub fn sha256_file_hex(path: &Path) -> Result<String, VaultError> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
     loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
         }
-        hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
 }

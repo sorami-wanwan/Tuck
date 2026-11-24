@@ -242,10 +242,7 @@ async fn test_lan_server_auth_security_rbac_streaming_and_lock() {
     };
 
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     // Write dummy dist index.html
     let dist_dir = dir.path().join("dist");
@@ -534,10 +531,7 @@ async fn test_lan_server_auto_expire_timer() {
     let vault_path = dir.path().join("lan_timer.vault");
     let db = VaultDb::create(&vault_path, "timer-pass", true).unwrap();
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     let (handle, status) = start_lan_server_on_addr(
         state.clone(),
@@ -647,10 +641,7 @@ async fn test_lan_server_plain_export_and_zip_downloads() {
     .unwrap();
 
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     let (handle, status) = start_lan_server_on_addr(
         state.clone(),
@@ -871,10 +862,7 @@ async fn test_lan_server_plain_export_and_zip_downloads() {
     assert_eq!(redeem2.status, 404);
 
     // 6. Locked DB returns 403 VAULT_NOT_OPEN
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = None;
-    }
+    state.set_db(None).unwrap();
     let locked_res = send_raw_http(
         port,
         "GET",
@@ -933,10 +921,7 @@ async fn test_lan_server_batch_entry_tags_rbac_and_sync() {
         .unwrap();
 
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     let dist_dir = dir.path().join("dist");
     fs::create_dir_all(&dist_dir).unwrap();
@@ -1143,10 +1128,7 @@ async fn test_lan_server_batch_entry_rating_rbac_and_sync() {
         .unwrap();
 
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     let dist_dir = dir.path().join("dist");
     fs::create_dir_all(&dist_dir).unwrap();
@@ -1412,10 +1394,7 @@ async fn test_lan_query_entries_media_type_filter() {
         .unwrap();
 
     let state = AppState::default();
-    {
-        let mut g = state.lock_db().unwrap();
-        *g = Some(db);
-    }
+    state.set_db(Some(db)).unwrap();
 
     let dist_dir = dir.path().join("dist");
     fs::create_dir_all(&dist_dir).unwrap();
@@ -1528,6 +1507,178 @@ async fn test_lan_query_entries_media_type_filter() {
     .await;
     assert_eq!(manga.len(), 1);
     assert_eq!(manga[0]["id"], grp.id);
+
+    handle.stop("test_done");
+}
+
+#[tokio::test]
+async fn test_lan_server_regression_routes_security_and_tag_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("lan_reg.vault");
+    let mut db = VaultDb::create(&vault_path, "reg-pass", true).unwrap();
+
+    let png = minimal_png_bytes();
+    let img_id = match db.import_bytes(&png, Some("tag_item")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected imported png"),
+    };
+    db.add_tag(&img_id, "100%推し").unwrap();
+    db.add_tag(&img_id, "100%20").unwrap();
+
+    let mut png2 = minimal_png_bytes();
+    png2.push(1);
+    let mut png3 = minimal_png_bytes();
+    png3.extend_from_slice(&[2, 3]);
+    let p1 = match db.import_bytes(&png2, Some("grp_p1")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p1"),
+    };
+    let p2 = match db.import_bytes(&png3, Some("grp_p2")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p2"),
+    };
+    let grp = db
+        .create_group_from_items(&[p1, p2], Some("tag_grp"), None)
+        .unwrap();
+    db.add_group_tag(&grp.id, "100%推し").unwrap();
+
+    let video_path = dir.path().join("chunked.mp4");
+    let mut vid = sample_mp4_bytes();
+    vid.resize(2500, 0xAB);
+    fs::write(&video_path, &vid).unwrap();
+    let chunked_vid_id = match db
+        .import_media_file_with_chunk_params(&video_path, Some("chunk_vid"), None, 1000, 1024, 1024)
+        .unwrap()
+    {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected chunked video"),
+    };
+
+    let state = AppState::default();
+    state.set_db(Some(db)).unwrap();
+
+    let dist_dir = dir.path().join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+    fs::write(
+        dist_dir.join("index.html"),
+        "<html><body>Tuck</body></html>",
+    )
+    .unwrap();
+
+    let (handle, status) = start_lan_server_on_addr(
+        state.clone(),
+        StartLanShareRequest {
+            mode: LanAccessMode::ReadOnly,
+            duration_minutes: 30,
+            bind_ip: None,
+            pause_idle_lock: true,
+        },
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "127.0.0.1".to_string(),
+        vec![],
+        AssetSource::Dir(dist_dir),
+        LanHostNotifier::default(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut g = state.lan_server.lock().unwrap();
+        *g = Some(handle.clone());
+    }
+
+    let port = status.port;
+    let pin_body = format!(r#"{{"pin":"{}"}}"#, status.pin);
+    let pin_ok = send_raw_http(
+        port,
+        "POST",
+        "/api/auth/pin",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        pin_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(pin_ok.status, 200);
+    let cookie = pin_ok
+        .headers
+        .get("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // GET /api/import/ytdlp-status requires ReadWrite (no CSRF header needed for GET)
+    let ro_ytdlp = send_raw_http(
+        port,
+        "GET",
+        "/api/import/ytdlp-status",
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(ro_ytdlp.status, 403);
+
+    handle.set_mode(LanAccessMode::ReadWrite);
+    let rw_ytdlp = send_raw_http(
+        port,
+        "GET",
+        "/api/import/ytdlp-status",
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(rw_ytdlp.status, 200);
+
+    // GET /api/images/{chunked_video} returns 400 instead of loading video into RAM
+    let chunked_img_res = send_raw_http(
+        port,
+        "GET",
+        &format!("/api/images/{chunked_vid_id}"),
+        &[("Cookie", &cookie)],
+        b"",
+    )
+    .await;
+    assert_eq!(chunked_img_res.status, 400);
+
+    // Single percent-decode on DELETE tag routes ("100%推し" and "100%20")
+    let del_oshi = send_raw_http(
+        port,
+        "DELETE",
+        &format!("/api/items/{img_id}/tags/100%25%E6%8E%A8%E3%81%97"),
+        &[("Cookie", &cookie), ("X-Tuck-Client", "web")],
+        b"",
+    )
+    .await;
+    assert_eq!(del_oshi.status, 200);
+
+    let del_pct20 = send_raw_http(
+        port,
+        "DELETE",
+        &format!("/api/items/{img_id}/tags/100%2520"),
+        &[("Cookie", &cookie), ("X-Tuck-Client", "web")],
+        b"",
+    )
+    .await;
+    assert_eq!(del_pct20.status, 200);
+
+    let del_grp_oshi = send_raw_http(
+        port,
+        "DELETE",
+        &format!("/api/groups/{}/tags/100%25%E6%8E%A8%E3%81%97", grp.id),
+        &[("Cookie", &cookie), ("X-Tuck-Client", "web")],
+        b"",
+    )
+    .await;
+    assert_eq!(del_grp_oshi.status, 200);
+
+    {
+        let g = state.lock_db().unwrap();
+        let db_ref = g.as_ref().unwrap();
+        assert!(db_ref.get_item_detail(&img_id).unwrap().tags.is_empty());
+        assert!(db_ref.get_group_detail(&grp.id).unwrap().tags.is_empty());
+    }
 
     handle.stop("test_done");
 }

@@ -43,12 +43,30 @@ export function connectLanEventStream(): void {
   if (eventSource) return;
 
   const es = new EventSource("/api/events");
+  let errorStreak = 0;
+
+  es.onopen = () => {
+    errorStreak = 0;
+  };
+
   for (const [vaultEventName, sseName] of Object.entries(SSE_EVENT_MAP)) {
     es.addEventListener(sseName, (ev) => {
+      errorStreak = 0;
       const msg = ev as MessageEvent<string>;
       dispatchWebEvent(vaultEventName, msg.data);
     });
   }
+
+  es.onerror = () => {
+    errorStreak += 1;
+    if (es.readyState === EventSource.CLOSED || errorStreak >= 3) {
+      if (eventSource === es) {
+        disconnectLanEventStream();
+        dispatchWebEvent("vault://lan-stopped", JSON.stringify({ reason: "connection_lost" }));
+      }
+    }
+  };
+
   eventSource = es;
 }
 

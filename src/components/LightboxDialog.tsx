@@ -83,9 +83,9 @@ export function LightboxDialog({
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoFallbackGenRef = useRef(0);
   const [imageUrl, setImageUrl] = useState<string | undefined>(undefined);
   const [videoUrl, setVideoUrl] = useState<string | undefined>(undefined);
-  const [videoFallbackBlobUrl, setVideoFallbackBlobUrl] = useState<string | null>(null);
   const [videoLoop, setVideoLoop] = useState(false);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -93,7 +93,32 @@ export function LightboxDialog({
 
   const imageItems = items.filter((e) => e.kind === "image");
   const currentIndex = currentId ? imageItems.findIndex((i) => i.id === currentId) : -1;
-  const currentItem = currentIndex >= 0 ? imageItems[currentIndex] : null;
+  const listCurrentItem = currentIndex >= 0 ? imageItems[currentIndex] : null;
+  const currentItem: GalleryEntry | null =
+    listCurrentItem ??
+    (open && currentId && detail && detail.id === currentId
+      ? {
+          kind: "image",
+          id: detail.id,
+          coverItemId: detail.id,
+          coverMimeType: detail.mimeType,
+          coverHasThumbnail: detail.hasThumbnail,
+          pageCount: 1,
+          title: detail.title,
+          width: detail.width,
+          height: detail.height,
+          byteSize: detail.byteSize,
+          durationMs: detail.durationMs,
+          sourceUrl: detail.sourceUrl,
+          rating: detail.rating,
+          memoPreview: detail.memo,
+          tags: detail.tags,
+          folderIds: detail.folderIds,
+          palette: detail.palette,
+          createdAt: detail.createdAt,
+          deletedAt: detail.deletedAt,
+        }
+      : null);
   const prevItem = currentIndex > 0 ? imageItems[currentIndex - 1] : null;
   const nextItem =
     currentIndex >= 0 && currentIndex < imageItems.length - 1
@@ -117,43 +142,35 @@ export function LightboxDialog({
     } else {
       setNaturalSize(null);
     }
-  }, [currentId, open]);
+  }, [currentId, open, currentItem?.width, currentItem?.height]);
 
   useEffect(() => {
-    return () => {
-      if (videoFallbackBlobUrl) {
-        URL.revokeObjectURL(videoFallbackBlobUrl);
-      }
-    };
-  }, [videoFallbackBlobUrl]);
-
-  useEffect(() => {
-    if (!open || !currentItem) {
-      setImageUrl(undefined);
-      setVideoUrl(undefined);
-      setVideoFallbackBlobUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
-      return;
-    }
-
+    if (!open) return;
     if (prevItem && !isVideoMime(prevItem.coverMimeType)) {
       imageMemoryCache.prefetchFullImage(prevItem.id, prevItem.coverMimeType);
     }
     if (nextItem && !isVideoMime(nextItem.coverMimeType)) {
       imageMemoryCache.prefetchFullImage(nextItem.id, nextItem.coverMimeType);
     }
+  }, [open, prevItem?.id, prevItem?.coverMimeType, nextItem?.id, nextItem?.coverMimeType]);
+
+  useEffect(() => {
+    const gen = ++videoFallbackGenRef.current;
+    if (!open || !currentItem) {
+      setImageUrl(undefined);
+      setVideoUrl(undefined);
+      return;
+    }
 
     if (isVideoMime(currentItem.coverMimeType)) {
       setImageUrl(undefined);
-      setVideoFallbackBlobUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
       setVideoLoop(currentItem.durationMs > 0 && currentItem.durationMs <= 15_000);
       setVideoUrl(imageMemoryCache.getVaultMediaStreamUrl(currentItem.id));
-      return;
+      return () => {
+        if (videoFallbackGenRef.current === gen) {
+          videoFallbackGenRef.current += 1;
+        }
+      };
     }
 
     setVideoUrl(undefined);
@@ -168,8 +185,11 @@ export function LightboxDialog({
 
     return () => {
       active = false;
+      if (videoFallbackGenRef.current === gen) {
+        videoFallbackGenRef.current += 1;
+      }
     };
-  }, [open, currentItem?.id, currentItem?.coverMimeType, prevItem?.id, nextItem?.id]);
+  }, [open, currentItem?.id, currentItem?.coverMimeType, currentItem?.durationMs]);
 
   const layoutScale = naturalSize
     ? Math.min(1, MAX_LAYOUT_EDGE / Math.max(naturalSize.width, naturalSize.height, 1))
@@ -205,6 +225,11 @@ export function LightboxDialog({
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: globalThis.KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const openDialogs = document.querySelectorAll("dialog[open]");
+      if (openDialogs.length > 0 && openDialogs[openDialogs.length - 1] !== dialogRef.current) {
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -226,10 +251,10 @@ export function LightboxDialog({
         e.preventDefault();
         if (videoRef.current.paused) void videoRef.current.play();
         else videoRef.current.pause();
-      } else if (!readOnly && e.key >= "1" && e.key <= "5" && currentItem) {
+      } else if (!readOnly && e.key >= "1" && e.key <= "5" && currentItem && currentItem.deletedAt === null) {
         e.preventDefault();
         void onUpdateRating(currentItem.id, Number(e.key));
-      } else if (!readOnly && e.key === "0" && currentItem) {
+      } else if (!readOnly && e.key === "0" && currentItem && currentItem.deletedAt === null) {
         e.preventDefault();
         void onUpdateRating(currentItem.id, 0);
       } else if (e.key === "i" || e.key === "I") {
@@ -405,12 +430,15 @@ export function LightboxDialog({
                 className="lightbox-video"
                 onError={() => {
                   if (!videoUrl.startsWith("blob:") && currentItem.byteSize <= 128 * 1024 * 1024) {
+                    const gen = videoFallbackGenRef.current;
                     const targetId = currentItem.id;
                     const targetMime = currentItem.coverMimeType;
                     void imageMemoryCache
                       .getFullImageUrl(targetId, targetMime)
                       .then((blobUrl) => {
-                        setVideoUrl(blobUrl);
+                        if (videoFallbackGenRef.current === gen) {
+                          setVideoUrl(blobUrl);
+                        }
                       })
                       .catch(() => {});
                   }

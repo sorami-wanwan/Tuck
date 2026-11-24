@@ -131,3 +131,10 @@ CREATE TABLE IF NOT EXISTS blob_chunks (
     PRIMARY KEY (item_id, chunk_index)
 );
 "#;
+
+pub(super) const PERFORMANCE_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_items_deleted_mime ON items(deleted_at, mime_type);
+CREATE INDEX IF NOT EXISTS idx_items_deleted_byte_size ON items(deleted_at, byte_size);
+CREATE INDEX IF NOT EXISTS idx_groups_deleted ON groups(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_group_items_group_order_item ON group_items(group_id, page_order ASC, item_id ASC);
+"#;

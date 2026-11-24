@@ -23,7 +23,9 @@ impl VaultDb {
                 EntryKind::Image => {
                     count += tx.execute(
                         "UPDATE items SET deleted_at = ?2, updated_at = ?2
-                         WHERE id = ?1 AND deleted_at IS NULL",
+                         WHERE id = ?1
+                           AND deleted_at IS NULL
+                           AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
                         params![entry.id, now],
                     )?;
                 }
@@ -63,7 +65,9 @@ impl VaultDb {
                 EntryKind::Image => {
                     count += tx.execute(
                         "UPDATE items SET deleted_at = NULL, updated_at = ?2
-                         WHERE id = ?1 AND deleted_at IS NOT NULL",
+                         WHERE id = ?1
+                           AND deleted_at IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
                         params![entry.id, now],
                     )?;
                 }
@@ -88,19 +92,29 @@ impl VaultDb {
         Ok(count)
     }
 
-    pub fn permanently_delete_entries(
+    pub fn permanently_delete_entries_detailed(
         &mut self,
         entries: &[EntryRef],
-    ) -> Result<usize, VaultError> {
+    ) -> Result<(usize, Vec<String>), VaultError> {
         if entries.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new()));
         }
         let tx = self.conn.transaction()?;
         let mut deleted = 0usize;
+        let mut deleted_item_ids = Vec::new();
         for entry in entries {
             match entry.kind {
                 EntryKind::Image => {
-                    deleted += tx.execute("DELETE FROM items WHERE id = ?1", params![entry.id])?;
+                    let aff = tx.execute(
+                        "DELETE FROM items
+                         WHERE id = ?1
+                           AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
+                        params![entry.id],
+                    )?;
+                    if aff > 0 {
+                        deleted += aff;
+                        deleted_item_ids.push(entry.id.clone());
+                    }
                 }
                 EntryKind::Group => {
                     let member_ids: Vec<String> = {
@@ -117,6 +131,7 @@ impl VaultDb {
                         tx.execute("DELETE FROM groups WHERE id = ?1", params![entry.id])?;
                     for mid in member_ids {
                         tx.execute("DELETE FROM items WHERE id = ?1", params![mid])?;
+                        deleted_item_ids.push(mid);
                     }
                     deleted += g_del;
                 }
@@ -124,6 +139,15 @@ impl VaultDb {
         }
         prune_orphan_tags(&tx)?;
         tx.commit()?;
+        Ok((deleted, deleted_item_ids))
+    }
+
+    #[cfg(test)]
+    pub fn permanently_delete_entries(
+        &mut self,
+        entries: &[EntryRef],
+    ) -> Result<usize, VaultError> {
+        let (deleted, _) = self.permanently_delete_entries_detailed(entries)?;
         Ok(deleted)
     }
 
@@ -156,66 +180,104 @@ impl VaultDb {
 
     // ---- Batch Tag / Folder Lookup Helpers ----
 
-    pub(super) fn fetch_all_item_tags(&self) -> Result<HashMap<String, Vec<String>>, VaultError> {
-        let mut stmt = self.conn.prepare(
+    const SCOPED_LOOKUP_MAX_IDS: usize = 500;
+    const IN_CLAUSE_CHUNK_SIZE: usize = 200;
+
+    fn fetch_relation_map(
+        &self,
+        ids: &[String],
+        all_sql: &str,
+        chunked_prefix: &str,
+        chunked_suffix: &str,
+    ) -> Result<HashMap<String, Vec<String>>, VaultError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        if ids.len() > Self::SCOPED_LOOKUP_MAX_IDS {
+            let mut stmt = self.conn.prepare(all_sql)?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (k, v) = row?;
+                map.entry(k).or_default().push(v);
+            }
+            return Ok(map);
+        }
+        for chunk in ids.chunks(Self::IN_CLAUSE_CHUNK_SIZE) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!("{chunked_prefix}{placeholders}{chunked_suffix}");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params_from_iter(chunk.iter().map(|s| Value::Text(s.clone()))),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )?;
+            for row in rows {
+                let (k, v) = row?;
+                map.entry(k).or_default().push(v);
+            }
+        }
+        Ok(map)
+    }
+
+    pub(super) fn fetch_item_tags_for_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, VaultError> {
+        self.fetch_relation_map(
+            ids,
             "SELECT it.item_id, t.name
              FROM item_tags it
              JOIN tags t ON t.id = it.tag_id
              ORDER BY t.name COLLATE NOCASE ASC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for row in rows {
-            let (id, name) = row?;
-            map.entry(id).or_default().push(name);
-        }
-        Ok(map)
+            "SELECT it.item_id, t.name
+             FROM item_tags it
+             JOIN tags t ON t.id = it.tag_id
+             WHERE it.item_id IN (",
+            ") ORDER BY t.name COLLATE NOCASE ASC",
+        )
     }
 
-    pub(super) fn fetch_all_group_tags(&self) -> Result<HashMap<String, Vec<String>>, VaultError> {
-        let mut stmt = self.conn.prepare(
+    pub(super) fn fetch_group_tags_for_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, VaultError> {
+        self.fetch_relation_map(
+            ids,
             "SELECT gt.group_id, t.name
              FROM group_tags gt
              JOIN tags t ON t.id = gt.tag_id
              ORDER BY t.name COLLATE NOCASE ASC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for row in rows {
-            let (id, name) = row?;
-            map.entry(id).or_default().push(name);
-        }
-        Ok(map)
+            "SELECT gt.group_id, t.name
+             FROM group_tags gt
+             JOIN tags t ON t.id = gt.tag_id
+             WHERE gt.group_id IN (",
+            ") ORDER BY t.name COLLATE NOCASE ASC",
+        )
     }
 
-    pub(super) fn fetch_all_item_folders(
+    pub(super) fn fetch_item_folders_for_ids(
         &self,
+        ids: &[String],
     ) -> Result<HashMap<String, Vec<String>>, VaultError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT item_id, folder_id FROM folder_items")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for row in rows {
-            let (id, fid) = row?;
-            map.entry(id).or_default().push(fid);
-        }
-        Ok(map)
+        self.fetch_relation_map(
+            ids,
+            "SELECT item_id, folder_id FROM folder_items",
+            "SELECT item_id, folder_id FROM folder_items WHERE item_id IN (",
+            ")",
+        )
     }
 
-    pub(super) fn fetch_all_group_folders(
+    pub(super) fn fetch_group_folders_for_ids(
         &self,
+        ids: &[String],
     ) -> Result<HashMap<String, Vec<String>>, VaultError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT group_id, folder_id FROM folder_groups")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for row in rows {
-            let (id, fid) = row?;
-            map.entry(id).or_default().push(fid);
-        }
-        Ok(map)
+        self.fetch_relation_map(
+            ids,
+            "SELECT group_id, folder_id FROM folder_groups",
+            "SELECT group_id, folder_id FROM folder_groups WHERE group_id IN (",
+            ")",
+        )
     }
 
     pub(super) fn fetch_tags_for_item(&self, item_id: &str) -> Result<Vec<String>, VaultError> {
@@ -290,8 +352,6 @@ impl VaultDb {
 
         // 1. Standalone Items
         if include_standalone {
-            let mut item_tags_map = self.fetch_all_item_tags()?;
-            let mut item_folders_map = self.fetch_all_item_folders()?;
             let mut sql = String::from(
                 "SELECT i.id, i.title, i.mime_type, i.width, i.height, i.byte_size, i.rating,
                         i.memo, i.palette, i.created_at, i.deleted_at,
@@ -407,51 +467,42 @@ impl VaultDb {
                 })
             })?;
 
+            let mut standalone_ids = Vec::new();
             for row in rows {
-                let mut entry = row?;
+                let entry = row?;
+                standalone_ids.push(entry.id.clone());
+                results.push(entry);
+            }
+            let mut item_tags_map = self.fetch_item_tags_for_ids(&standalone_ids)?;
+            let mut item_folders_map = self.fetch_item_folders_for_ids(&standalone_ids)?;
+            for entry in &mut results {
                 if let Some(t) = item_tags_map.remove(&entry.id) {
                     entry.tags = t;
                 }
                 if let Some(f) = item_folders_map.remove(&entry.id) {
                     entry.folder_ids = f;
                 }
-                results.push(entry);
             }
         }
 
         // 2. Manga Groups
         if include_groups {
-            let mut group_tags_map = self.fetch_all_group_tags()?;
-            let mut group_folders_map = self.fetch_all_group_folders()?;
-            let mut sql = String::from(
-                "SELECT g.id, g.title, g.rating, g.memo, g.created_at, g.deleted_at,
-                        ci.id, ci.mime_type, ci.width, ci.height, ci.palette,
-                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = ci.id) AS cover_has_thumb,
-                        (SELECT COUNT(*) FROM group_items gi2 WHERE gi2.group_id = g.id) AS page_cnt,
-                        (SELECT COALESCE(SUM(pi.byte_size), 0)
-                         FROM group_items gi3 JOIN items pi ON pi.id = gi3.item_id
-                         WHERE gi3.group_id = g.id) AS sum_bytes
-                 FROM groups g
-                 JOIN group_items cgi ON cgi.group_id = g.id
-                    AND cgi.page_order = (SELECT MIN(gi0.page_order) FROM group_items gi0 WHERE gi0.group_id = g.id)
-                 JOIN items ci ON ci.id = cgi.item_id
-                 WHERE 1 = 1",
-            );
+            let mut filter_sql = String::new();
             let mut sql_params: Vec<Value> = Vec::new();
 
             match &query.scope {
-                QueryScope::Trash => sql.push_str(" AND g.deleted_at IS NOT NULL"),
-                QueryScope::All => sql.push_str(" AND g.deleted_at IS NULL"),
-                QueryScope::Uncategorized => sql.push_str(
+                QueryScope::Trash => filter_sql.push_str(" AND g.deleted_at IS NOT NULL"),
+                QueryScope::All => filter_sql.push_str(" AND g.deleted_at IS NULL"),
+                QueryScope::Uncategorized => filter_sql.push_str(
                     " AND g.deleted_at IS NULL
                       AND NOT EXISTS (SELECT 1 FROM folder_groups fg WHERE fg.group_id = g.id)",
                 ),
-                QueryScope::Untagged => sql.push_str(
+                QueryScope::Untagged => filter_sql.push_str(
                     " AND g.deleted_at IS NULL
                       AND NOT EXISTS (SELECT 1 FROM group_tags gt WHERE gt.group_id = g.id)",
                 ),
                 QueryScope::Folder { folder_id } => {
-                    sql.push_str(
+                    filter_sql.push_str(
                         " AND g.deleted_at IS NULL
                           AND EXISTS (SELECT 1 FROM folder_groups fg WHERE fg.group_id = g.id AND fg.folder_id = ?)",
                     );
@@ -464,7 +515,7 @@ impl VaultDb {
                 if normalized.is_empty() {
                     continue;
                 }
-                sql.push_str(
+                filter_sql.push_str(
                     " AND EXISTS (
                         SELECT 1 FROM group_tags gt
                         JOIN tags t ON t.id = gt.tag_id
@@ -475,13 +526,13 @@ impl VaultDb {
             }
 
             if let Some(min_rating) = query.min_rating {
-                sql.push_str(" AND g.rating >= ?");
+                filter_sql.push_str(" AND g.rating >= ?");
                 sql_params.push(Value::Integer(min_rating as i64));
             }
 
             if !query.mime_types.is_empty() {
                 let placeholders: Vec<&str> = query.mime_types.iter().map(|_| "?").collect();
-                sql.push_str(&format!(
+                filter_sql.push_str(&format!(
                     " AND EXISTS (
                         SELECT 1 FROM group_items mgi
                         JOIN items mi ON mi.id = mgi.item_id
@@ -496,7 +547,7 @@ impl VaultDb {
 
             if !trimmed_text.is_empty() {
                 let pattern = format!("%{}%", escape_like(&trimmed_text));
-                sql.push_str(
+                filter_sql.push_str(
                     " AND (
                         g.title LIKE ? ESCAPE '\\' COLLATE NOCASE
                         OR g.memo LIKE ? ESCAPE '\\' COLLATE NOCASE
@@ -511,6 +562,39 @@ impl VaultDb {
                 sql_params.push(Value::Text(pattern.clone()));
                 sql_params.push(Value::Text(pattern));
             }
+
+            let sql = format!(
+                "WITH matched_groups AS (
+                     SELECT g.id, g.title, g.rating, g.memo, g.created_at, g.deleted_at
+                     FROM groups g
+                     WHERE 1 = 1{filter_sql}
+                 ),
+                 group_stats AS (
+                     SELECT gi.group_id,
+                            COUNT(*) AS page_cnt,
+                            COALESCE(SUM(pi.byte_size), 0) AS sum_bytes
+                     FROM group_items gi
+                     JOIN matched_groups mg ON mg.id = gi.group_id
+                     JOIN items pi ON pi.id = gi.item_id
+                     GROUP BY gi.group_id
+                 )
+                 SELECT g.id, g.title, g.rating, g.memo, g.created_at, g.deleted_at,
+                        ci.id, ci.mime_type, ci.width, ci.height, ci.palette,
+                        EXISTS(SELECT 1 FROM thumbnails th WHERE th.item_id = ci.id) AS cover_has_thumb,
+                        gs.page_cnt,
+                        gs.sum_bytes
+                 FROM matched_groups g
+                 JOIN group_stats gs ON gs.group_id = g.id
+                 JOIN group_items cgi ON cgi.group_id = g.id
+                    AND cgi.item_id = (
+                        SELECT gi0.item_id
+                        FROM group_items gi0
+                        WHERE gi0.group_id = g.id
+                        ORDER BY gi0.page_order ASC, gi0.item_id ASC
+                        LIMIT 1
+                    )
+                 JOIN items ci ON ci.id = cgi.item_id"
+            );
 
             let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt.query_map(params_from_iter(sql_params.iter()), |r| {
@@ -539,15 +623,22 @@ impl VaultDb {
                 })
             })?;
 
+            let standalone_end = results.len();
+            let mut group_ids = Vec::new();
             for row in rows {
-                let mut entry = row?;
+                let entry = row?;
+                group_ids.push(entry.id.clone());
+                results.push(entry);
+            }
+            let mut group_tags_map = self.fetch_group_tags_for_ids(&group_ids)?;
+            let mut group_folders_map = self.fetch_group_folders_for_ids(&group_ids)?;
+            for entry in &mut results[standalone_end..] {
                 if let Some(t) = group_tags_map.remove(&entry.id) {
                     entry.tags = t;
                 }
                 if let Some(f) = group_folders_map.remove(&entry.id) {
                     entry.folder_ids = f;
                 }
-                results.push(entry);
             }
         }
 

@@ -132,6 +132,36 @@ pub fn resolve_media_slice(
         });
     }
 
+    if is_head {
+        if let Some(rh) = range_header {
+            let Some((start, raw_end)) = parse_byte_range(rh, total) else {
+                return Ok(MediaStreamSlice {
+                    status: StatusCode::RANGE_NOT_SATISFIABLE,
+                    mime_type,
+                    content_range: Some(format!("bytes */{total}")),
+                    content_length: 0,
+                    body: Vec::new(),
+                });
+            };
+            let end = raw_end.min(start.saturating_add(MAX_STREAM_CHUNK_BYTES.saturating_sub(1)));
+            let len = end.saturating_sub(start).saturating_add(1);
+            return Ok(MediaStreamSlice {
+                status: StatusCode::PARTIAL_CONTENT,
+                mime_type,
+                content_range: Some(format!("bytes {start}-{end}/{total}")),
+                content_length: len,
+                body: Vec::new(),
+            });
+        }
+        return Ok(MediaStreamSlice {
+            status: StatusCode::OK,
+            mime_type,
+            content_range: None,
+            content_length: total,
+            body: Vec::new(),
+        });
+    }
+
     let (cached_mime, bytes) = state.get_or_load_media(item_id)?;
     let full_len = bytes.len();
 
@@ -147,27 +177,21 @@ pub fn resolve_media_slice(
         };
         let end = raw_end.min(start.saturating_add(MAX_STREAM_CHUNK_BYTES.saturating_sub(1)));
         let slice = &bytes[start..=end];
-        let body = if is_head { Vec::new() } else { slice.to_vec() };
         return Ok(MediaStreamSlice {
             status: StatusCode::PARTIAL_CONTENT,
             mime_type: cached_mime,
             content_range: Some(format!("bytes {start}-{end}/{full_len}")),
             content_length: slice.len(),
-            body,
+            body: slice.to_vec(),
         });
     }
 
-    let body = if is_head {
-        Vec::new()
-    } else {
-        bytes.as_ref().clone()
-    };
     Ok(MediaStreamSlice {
         status: StatusCode::OK,
         mime_type: cached_mime,
         content_range: None,
         content_length: full_len,
-        body,
+        body: bytes.as_ref().clone(),
     })
 }
 
@@ -249,10 +273,7 @@ mod tests {
         };
 
         let state = AppState::default();
-        {
-            let mut guard = state.lock_db().unwrap();
-            *guard = Some(db);
-        }
+        state.set_db(Some(db)).unwrap();
 
         // Full non-chunked 200
         let full = resolve_media_slice(&state, &single_id, false, None).unwrap();

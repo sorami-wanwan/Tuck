@@ -1,7 +1,8 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Cursor;
 
-use image::{imageops::FilterType, DynamicImage, ImageFormat, RgbaImage};
+use image::{imageops::FilterType, DynamicImage, ImageFormat, ImageReader, Limits, RgbaImage};
 
 use crate::error::VaultError;
 
@@ -95,6 +96,17 @@ fn is_quicktime(bytes: &[u8]) -> bool {
 }
 
 fn is_mp4(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let major = &bytes[8..12];
+    const NON_VIDEO_MAJOR_BRANDS: &[&[u8; 4]] = &[
+        b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"M4A ", b"M4B ", b"M4P ", b"jxl ",
+        b"avif", b"avis",
+    ];
+    if NON_VIDEO_MAJOR_BRANDS.iter().any(|b| major == *b) {
+        return false;
+    }
     ftyp_has_brand(
         bytes,
         &[
@@ -189,12 +201,40 @@ pub fn extract_palette(img: &RgbaImage, max_colors: usize) -> Vec<String> {
         .collect()
 }
 
+fn mime_to_image_format(mime: &str) -> Option<ImageFormat> {
+    match mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::WebP),
+        _ => None,
+    }
+}
+
+fn decode_image_with_limits(
+    bytes: &[u8],
+    format: ImageFormat,
+    max_edge: u32,
+    max_alloc: u64,
+) -> Result<DynamicImage, VaultError> {
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(max_edge);
+    limits.max_image_height = Some(max_edge);
+    limits.max_alloc = Some(max_alloc);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| VaultError::CorruptedImage(e.to_string()))
+}
+
 pub fn encode_webp_thumbnail(img: &DynamicImage) -> Result<GeneratedThumbnail, VaultError> {
-    let resized = if img.width() > THUMB_MAX_EDGE || img.height() > THUMB_MAX_EDGE {
-        img.resize(THUMB_MAX_EDGE, THUMB_MAX_EDGE, FilterType::Lanczos3)
-    } else {
-        img.clone()
-    };
+    let resized: Cow<'_, DynamicImage> =
+        if img.width() > THUMB_MAX_EDGE || img.height() > THUMB_MAX_EDGE {
+            Cow::Owned(img.resize(THUMB_MAX_EDGE, THUMB_MAX_EDGE, FilterType::Lanczos3))
+        } else {
+            Cow::Borrowed(img)
+        };
 
     let rgba = resized.to_rgba8();
     let tw = rgba.width();
@@ -203,9 +243,15 @@ pub fn encode_webp_thumbnail(img: &DynamicImage) -> Result<GeneratedThumbnail, V
 
     let encoder = webp::Encoder::from_rgba(rgba.as_raw(), tw, th);
     let webp_mem = encoder.encode(THUMB_WEBP_QUALITY);
+    let data = webp_mem.to_vec();
+    if data.is_empty() {
+        return Err(VaultError::CorruptedImage(
+            "サムネイルのエンコードに失敗しました".to_string(),
+        ));
+    }
 
     Ok(GeneratedThumbnail {
-        data: webp_mem.to_vec(),
+        data,
         width: tw as i32,
         height: th as i32,
         palette,
@@ -224,8 +270,10 @@ pub fn process_image_bytes(bytes: &[u8]) -> Result<ProcessedImage, VaultError> {
         });
     }
 
-    let img =
-        image::load_from_memory(bytes).map_err(|e| VaultError::CorruptedImage(e.to_string()))?;
+    let format = mime_to_image_format(mime_type).ok_or_else(|| {
+        VaultError::UnsupportedFormat(format!("非対応の画像形式です: {mime_type}"))
+    })?;
+    let img = decode_image_with_limits(bytes, format, 32_768, 256 * 1024 * 1024)?;
     let width = img.width() as i32;
     let height = img.height() as i32;
     let thumb = encode_webp_thumbnail(&img)?;
@@ -241,8 +289,7 @@ pub fn process_image_bytes(bytes: &[u8]) -> Result<ProcessedImage, VaultError> {
 }
 
 pub fn process_client_png_thumbnail(png_bytes: &[u8]) -> Result<GeneratedThumbnail, VaultError> {
-    let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)
-        .map_err(|e| VaultError::CorruptedImage(e.to_string()))?;
+    let img = decode_image_with_limits(png_bytes, ImageFormat::Png, 4_096, 64 * 1024 * 1024)?;
     encode_webp_thumbnail(&img)
 }
 
@@ -254,4 +301,37 @@ pub fn rgba_to_png_bytes(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
     img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
         .map_err(|e| VaultError::CorruptedImage(e.to_string()))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ftyp(major: &[u8; 4], compatible: Option<&[u8; 4]>) -> Vec<u8> {
+        let size: u32 = if compatible.is_some() { 20 } else { 16 };
+        let mut out = Vec::new();
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(major);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        if let Some(comp) = compatible {
+            out.extend_from_slice(comp);
+        }
+        out
+    }
+
+    #[test]
+    fn test_detect_mime_ftyp_brands_rejects_heic_m4a_accepts_mp4() {
+        assert_eq!(detect_mime(&make_ftyp(b"isom", Some(b"mp42"))).unwrap(), "video/mp4");
+        assert_eq!(detect_mime(&make_ftyp(b"mp42", None)).unwrap(), "video/mp4");
+        assert_eq!(detect_mime(&make_ftyp(b"qt  ", None)).unwrap(), "video/quicktime");
+        assert!(matches!(
+            detect_mime(&make_ftyp(b"heic", Some(b"mif1"))),
+            Err(VaultError::UnsupportedFormat(_))
+        ));
+        assert!(matches!(
+            detect_mime(&make_ftyp(b"M4A ", Some(b"mp42"))),
+            Err(VaultError::UnsupportedFormat(_))
+        ));
+    }
 }

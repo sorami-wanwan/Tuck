@@ -44,6 +44,8 @@ interface MangaReaderDialogProps {
   onPlainExport?: (group: GroupDetail) => void;
   onUngroup: (groupId: string) => Promise<void>;
   onMoveToTrash: (groupId: string) => Promise<void>;
+  onRestoreFromTrash: (groupId: string) => Promise<void>;
+  onPermanentlyDelete: (groupId: string) => Promise<void>;
 }
 
 const MAX_SPREAD_HEIGHT = 2800;
@@ -97,6 +99,8 @@ export function MangaReaderDialog({
   onPlainExport,
   onUngroup,
   onMoveToTrash,
+  onRestoreFromTrash,
+  onPermanentlyDelete,
 }: MangaReaderDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -128,6 +132,8 @@ export function MangaReaderDialog({
 
   useEffect(() => {
     setPageIdx(0);
+    setPageUrls({});
+    setNaturalDims({});
     setHudHidden(false);
     if (group) {
       setLocalPrefs({
@@ -138,10 +144,18 @@ export function MangaReaderDialog({
     }
   }, [group?.id, open]);
 
-  const spreadMode = readOnly ? localPrefs.spreadMode : (group?.spreadMode ?? "single");
-  const readingDir = readOnly ? localPrefs.readingDir : (group?.readingDir ?? "rtl");
-  const coverAlone = readOnly ? localPrefs.coverAlone : (group?.coverAlone ?? true);
+  const useLocalPrefsOnly = readOnly || group?.deletedAt !== null;
+  const spreadMode = useLocalPrefsOnly ? localPrefs.spreadMode : (group?.spreadMode ?? "single");
+  const readingDir = useLocalPrefsOnly ? localPrefs.readingDir : (group?.readingDir ?? "rtl");
+  const coverAlone = useLocalPrefsOnly ? localPrefs.coverAlone : (group?.coverAlone ?? true);
   const pages = group?.pages ?? [];
+
+  useEffect(() => {
+    setPageIdx((prev) => {
+      const maxIdx = Math.max(0, pages.length - 1);
+      return prev > maxIdx ? maxIdx : prev;
+    });
+  }, [pages.length]);
 
   const updateReaderPrefs = (
     nextDir: "rtl" | "ltr",
@@ -149,7 +163,7 @@ export function MangaReaderDialog({
     nextCover: boolean
   ) => {
     setLocalPrefs({ readingDir: nextDir, spreadMode: nextSpread, coverAlone: nextCover });
-    if (!readOnly && group) {
+    if (!readOnly && group && group.deletedAt === null) {
       void onUpdateReaderPrefs(group.id, nextDir, nextSpread, nextCover);
     }
   };
@@ -314,6 +328,11 @@ export function MangaReaderDialog({
   useEffect(() => {
     if (!open || !group) return;
     const handleKey = (e: globalThis.KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const openDialogs = document.querySelectorAll("dialog[open]");
+      if (openDialogs.length > 0 && openDialogs[openDialogs.length - 1] !== dialogRef.current) {
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -353,10 +372,10 @@ export function MangaReaderDialog({
       } else if (e.key === "c" || e.key === "C") {
         e.preventDefault();
         updateReaderPrefs(readingDir, spreadMode, !coverAlone);
-      } else if (!readOnly && e.key >= "1" && e.key <= "5") {
+      } else if (!readOnly && group.deletedAt === null && e.key >= "1" && e.key <= "5") {
         e.preventDefault();
         void onUpdateRating(group.id, Number(e.key));
-      } else if (!readOnly && e.key === "0") {
+      } else if (!readOnly && group.deletedAt === null && e.key === "0") {
         e.preventDefault();
         void onUpdateRating(group.id, 0);
       } else if (e.key === "i" || e.key === "I") {
@@ -507,13 +526,13 @@ export function MangaReaderDialog({
               <RotateCcw size={14} />
             </button>
 
-            {!readOnly && (
+            {!readOnly && group && group.deletedAt === null && (
               <button
                 type="button"
                 className="icon-btn"
                 title="ページ構成を編集"
                 aria-label="ページ構成を編集"
-                onClick={() => group && onOpenEditor(group.id)}
+                onClick={() => onOpenEditor(group.id)}
               >
                 <ListOrdered size={15} />
               </button>
@@ -569,7 +588,9 @@ export function MangaReaderDialog({
             }}
           >
             {orderedVisiblePages.map((p) => {
-              const url = pageUrls[p.itemId];
+              const rawUrl = pageUrls[p.itemId];
+              const cachedLiveUrl = imageMemoryCache.getCachedFullImageUrl(p.itemId);
+              const url = rawUrl && cachedLiveUrl === rawUrl ? rawUrl : cachedLiveUrl;
               const dim = stageLayout.sizes.get(p.itemId);
               return url ? (
                 <img
@@ -682,8 +703,8 @@ export function MangaReaderDialog({
             onPlainExport={onPlainExport ? () => onPlainExport(group) : undefined}
             onUngroup={() => onUngroup(group.id)}
             onMoveToTrash={() => onMoveToTrash(group.id)}
-            onRestoreFromTrash={async () => {}}
-            onPermanentlyDelete={async () => {}}
+            onRestoreFromTrash={() => onRestoreFromTrash(group.id)}
+            onPermanentlyDelete={() => onPermanentlyDelete(group.id)}
           />
         </aside>
       )}

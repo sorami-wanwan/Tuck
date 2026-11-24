@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   Archive,
   BookPlus,
@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import type { DropTarget } from "../hooks/useInternalDrag";
+import { isImeComposing } from "../utils/bulkTags";
 import type {
   FolderNode,
   LanShareStatus,
@@ -65,7 +66,13 @@ interface SidebarProps {
   onRenameFolder: (folderId: string, name: string, color?: string | null) => Promise<void>;
   onMoveFolder: (folderId: string, newParentId: string | null) => Promise<void>;
   onDeleteFolder: (folderId: string) => Promise<void>;
-  onBeginFolderDrag: (folderId: string, label: string, x: number, y: number) => void;
+  onBeginFolderDrag: (
+    folderId: string,
+    label: string,
+    x: number,
+    y: number,
+    pointerId?: number
+  ) => void;
 }
 
 const FOLDER_COLORS = [
@@ -127,6 +134,8 @@ export function Sidebar({
   const [newFolderName, setNewFolderName] = useState("");
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editFolderName, setEditFolderName] = useState("");
+  const committingCreateRef = useRef(false);
+  const committingRenameRef = useRef<string | null>(null);
   const [folderMenu, setFolderMenu] = useState<{
     folder: FolderNode;
     x: number;
@@ -175,6 +184,8 @@ export function Sidebar({
   };
 
   const commitCreateFolder = async () => {
+    if (committingCreateRef.current) return;
+    committingCreateRef.current = true;
     const parentId = creatingParentId === undefined ? null : creatingParentId;
     const trimmed = newFolderName.trim();
     setCreatingParentId(undefined);
@@ -187,6 +198,8 @@ export function Sidebar({
   };
 
   const commitRenameFolder = async (folder: FolderNode) => {
+    if (committingRenameRef.current === folder.id) return;
+    committingRenameRef.current = folder.id;
     const trimmed = editFolderName.trim();
     setEditingFolderId(null);
     if (!trimmed || trimmed === folder.name) return;
@@ -208,10 +221,12 @@ export function Sidebar({
         onChange={(e) => setNewFolderName(e.target.value)}
         onBlur={() => void commitCreateFolder()}
         onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+          if (isImeComposing(e)) return;
           if (e.key === "Enter") {
             e.preventDefault();
             void commitCreateFolder();
           } else if (e.key === "Escape") {
+            committingCreateRef.current = true;
             setCreatingParentId(undefined);
             setNewFolderName("");
           }
@@ -249,7 +264,7 @@ export function Sidebar({
                 onPointerDown={(e) => {
                   if (!canEdit || e.pointerType === "touch" || e.button !== 0 || isEditing) return;
                   if ((e.target as HTMLElement).closest("button, input")) return;
-                  onBeginFolderDrag(folder.id, folder.name, e.clientX, e.clientY);
+                  onBeginFolderDrag(folder.id, folder.name, e.clientX, e.clientY, e.pointerId);
                 }}
               >
                 <button
@@ -287,10 +302,12 @@ export function Sidebar({
                     onChange={(e) => setEditFolderName(e.target.value)}
                     onBlur={() => void commitRenameFolder(folder)}
                     onKeyDown={(e) => {
+                      if (isImeComposing(e)) return;
                       if (e.key === "Enter") {
                         e.preventDefault();
                         void commitRenameFolder(folder);
                       } else if (e.key === "Escape") {
+                        committingRenameRef.current = folder.id;
                         setEditingFolderId(null);
                       }
                     }}
@@ -321,6 +338,7 @@ export function Sidebar({
                 label: "子フォルダを作成",
                 icon: <FolderPlus size={13} />,
                 onClick: () => {
+                  committingCreateRef.current = false;
                   setExpandedIds((prev) => new Set(prev).add(folderMenu.folder.id));
                   setCreatingParentId(folderMenu.folder.id);
                   setNewFolderName("");
@@ -330,6 +348,7 @@ export function Sidebar({
                 id: "rename",
                 label: "名前を変更",
                 onClick: () => {
+                  committingRenameRef.current = null;
                   setEditingFolderId(folderMenu.folder.id);
                   setEditFolderName(folderMenu.folder.name);
                 },
@@ -619,6 +638,7 @@ export function Sidebar({
                 title="新しいフォルダを作成"
                 aria-label="新しいフォルダを作成"
                 onClick={() => {
+                  committingCreateRef.current = false;
                   setCreatingParentId(null);
                   setNewFolderName("");
                 }}

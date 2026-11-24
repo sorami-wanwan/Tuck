@@ -11,6 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -66,7 +67,7 @@ pub(super) const PIN_COOLDOWN_THRESHOLD: usize = 5;
 pub(super) const PIN_COOLDOWN_SECS: u64 = 60;
 pub(super) const PIN_HARD_LOCK_THRESHOLD: usize = 15;
 pub(super) const MAX_THUMBNAIL_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const STREAM_RAM_BUFFER_THRESHOLD: usize = 64 * 1024 * 1024;
+pub(super) const STREAM_RAM_BUFFER_THRESHOLD: usize = 16 * 1024 * 1024;
 pub(super) const DEFAULT_UPLOAD_LIMIT_MB: u32 = 2048;
 pub(super) const EXPORT_TICKET_TTL_SECS: u64 = 60;
 pub(super) const MAX_EXPORT_TICKETS: usize = 32;
@@ -208,7 +209,7 @@ pub(super) struct ClientSession {
     pub(super) ip: String,
     pub(super) device_label: String,
     pub(super) connected_at_ms: i64,
-    pub(super) last_seen_at_ms: i64,
+    pub(super) last_seen_at_ms: Arc<AtomicI64>,
 }
 
 #[derive(Clone)]
@@ -265,6 +266,10 @@ pub struct LanServerHandle {
 }
 
 impl LanServerHandle {
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime, &other.runtime)
+    }
+
     pub fn status(&self) -> LanShareStatus {
         self.runtime.build_status()
     }
@@ -300,12 +305,15 @@ impl LanServerHandle {
     ) -> Result<LanShareStatus, VaultError> {
         let new_pin = Zeroizing::new(generate_6_digit_pin()?);
         let new_token = Zeroizing::new(generate_random_hex(32)?);
+        let base_url = { self.runtime.store_read().url.clone() };
+        let new_qr_url = format!("{base_url}/?k={}", *new_token);
+        let new_qr_svg = generate_qr_svg(&new_qr_url)?;
         {
             let mut guard = self.runtime.store_write();
             guard.pin = new_pin;
             guard.qr_token = new_token;
-            guard.qr_url = format!("{}/?k={}", guard.url, *guard.qr_token);
-            guard.qr_svg = generate_qr_svg(&guard.qr_url)?;
+            guard.qr_url = new_qr_url;
+            guard.qr_svg = new_qr_svg;
             guard.pin_failures.clear();
             if disconnect_existing {
                 guard.sessions.clear();
@@ -395,7 +403,7 @@ impl LanServerRuntime {
                 ip: s.ip.clone(),
                 device_label: s.device_label.clone(),
                 connected_at_ms: s.connected_at_ms,
-                last_seen_at_ms: s.last_seen_at_ms,
+                last_seen_at_ms: s.last_seen_at_ms.load(Ordering::Relaxed),
             })
             .collect();
         clients.sort_by_key(|c| std::cmp::Reverse(c.last_seen_at_ms));
@@ -571,10 +579,18 @@ pub async fn start_lan_server(
     .await?;
 
     {
+        if !app_state.is_open() {
+            handle.stop("vault_locked");
+            return Err(VaultError::VaultNotOpen);
+        }
         let mut guard = app_state
             .lan_server
             .lock()
             .map_err(|_| VaultError::LanShare("内部状態ロックの取得に失敗しました".to_string()))?;
+        if !app_state.is_open() {
+            handle.stop("vault_locked");
+            return Err(VaultError::VaultNotOpen);
+        }
         if let Some(old) = guard.take() {
             old.stop("restarted");
         }
@@ -672,6 +688,7 @@ pub(crate) async fn start_lan_server_on_addr(
 
     // Auto-stop timer watcher
     let timer_runtime = Arc::clone(&runtime);
+    let timer_handle = handle.clone();
     let timer_app_state = app_state;
     tokio::spawn(async move {
         loop {
@@ -689,7 +706,7 @@ pub(crate) async fn start_lan_server_on_addr(
                 Some(deadline_ms) => {
                     let remain_ms = deadline_ms - now_ms();
                     if remain_ms <= 0 {
-                        timer_app_state.stop_lan_share_with_reason("expired");
+                        timer_app_state.stop_lan_share_if_same(&timer_handle, "expired");
                         break;
                     }
                     tokio::select! {
@@ -699,7 +716,7 @@ pub(crate) async fn start_lan_server_on_addr(
                                 g.running && g.expires_at_ms.is_some_and(|e| now_ms() >= e)
                             };
                             if still_expired {
-                                timer_app_state.stop_lan_share_with_reason("expired");
+                                timer_app_state.stop_lan_share_if_same(&timer_handle, "expired");
                                 break;
                             }
                         }

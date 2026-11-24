@@ -295,11 +295,20 @@ export function usePageGridDrag({
       }
     };
 
+    const gridEl = gridRef.current;
+    const onGridScroll = () => {
+      const p = pendingRef.current;
+      if (!p || !p.started) return;
+      updateDropAt(cursorRef.current.x, cursorRef.current.y, p.index);
+    };
+
+    gridEl?.addEventListener("scroll", onGridScroll, { passive: true });
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
     window.addEventListener("pointercancel", onCancel);
     window.addEventListener("keydown", onKeyDown, true);
     return () => {
+      gridEl?.removeEventListener("scroll", onGridScroll);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onCancel);

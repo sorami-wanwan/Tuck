@@ -243,7 +243,10 @@ impl VaultDb {
                 EntryKind::Image => {
                     let active: Option<String> = tx
                         .query_row(
-                            "SELECT id FROM items WHERE id = ?1 AND deleted_at IS NULL",
+                            "SELECT id FROM items
+                             WHERE id = ?1
+                               AND deleted_at IS NULL
+                               AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
                             params![entry.id],
                             |r| r.get(0),
                         )

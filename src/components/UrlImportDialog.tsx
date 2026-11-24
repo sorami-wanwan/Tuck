@@ -31,6 +31,7 @@ export function UrlImportDialog({
   onSaveUrlSettings,
   onImportUrl,
 }: UrlImportDialogProps) {
+  const tauri = isTauriRuntime();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const autoStartedRef = useRef(false);
   const latestAutoEnabledRef = useRef(urlImportSettings.enabled);
@@ -67,7 +68,7 @@ export function UrlImportDialog({
       });
       setBusy(true);
       try {
-        if (persistAutoFlag && autoOnPaste !== urlImportSettings.enabled) {
+        if (tauri && persistAutoFlag && autoOnPaste !== urlImportSettings.enabled) {
           await onSaveUrlSettings({
             ...urlImportSettings,
             enabled: autoOnPaste,
@@ -87,7 +88,7 @@ export function UrlImportDialog({
         dialogRef.current?.close();
       }
     },
-    [autoOnPaste, onImportUrl, onSaveUrlSettings, urlImportSettings]
+    [tauri, autoOnPaste, onImportUrl, onSaveUrlSettings, urlImportSettings]
   );
 
   useEffect(() => {
@@ -304,15 +305,17 @@ export function UrlImportDialog({
           </div>
         )}
 
-        <label className="checklist-row" style={{ paddingInline: 0 }}>
-          <input
-            type="checkbox"
-            checked={autoOnPaste}
-            disabled={busy}
-            onChange={(e) => setAutoOnPaste(e.target.checked)}
-          />
-          <span>今後は URL ペースト時（Cmd/Ctrl + V）に確認なしで自動取り込みする</span>
-        </label>
+        {tauri && (
+          <label className="checklist-row" style={{ paddingInline: 0 }}>
+            <input
+              type="checkbox"
+              checked={autoOnPaste}
+              disabled={busy}
+              onChange={(e) => setAutoOnPaste(e.target.checked)}
+            />
+            <span>今後は URL ペースト時（Cmd/Ctrl + V）に確認なしで自動取り込みする</span>
+          </label>
+        )}
 
         <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.55 }}>
           ※ 外部コマンド <code>yt-dlp</code> を用いて指定URLのみへ通信し、取得した動画は一時ファイルを残さず暗号化保管庫へ保存します（HLS・長尺変換時は処理完了直後に一時ファイルを自動消去します）。

@@ -45,6 +45,7 @@ interface ThumbnailGridProps {
   fitMode: ThumbFitMode;
   isDraggingOsFiles: boolean;
   isTrashView: boolean;
+  trashCount?: number;
   hasActiveFilters?: boolean;
   onResetFilters?: () => void;
   currentFolderId: string | null;
@@ -60,7 +61,12 @@ interface ThumbnailGridProps {
   onSelectSingle: (entry: GalleryEntry) => void;
   onOpenEntry: (entry: GalleryEntry) => void;
   onCardContextMenu: (entry: GalleryEntry, x: number, y: number) => void;
-  onBeginEntryDrag: (entry: GalleryEntry, x: number, y: number) => void;
+  onBeginEntryDrag: (
+    entry: GalleryEntry,
+    x: number,
+    y: number,
+    pointerId?: number
+  ) => void;
   onImportFiles: () => void;
   onAvifCompleted: () => void;
   onCreateGroupFromSelection: () => void;
@@ -111,7 +117,7 @@ interface ThumbCardProps {
   onClick: (e: MouseEvent) => void;
   onOpen: () => void;
   onContextMenu: (e: MouseEvent) => void;
-  onPointerDown: (clientX: number, clientY: number) => void;
+  onPointerDown: (clientX: number, clientY: number, pointerId?: number) => void;
   onAvifCompleted: () => void;
 }
 
@@ -197,7 +203,7 @@ function ThumbCard({
       onPointerDown={(e) => {
         if (!canEdit || e.pointerType === "touch" || e.button !== 0) return;
         if ((e.target as HTMLElement).closest("button")) return;
-        onPointerDown(e.clientX, e.clientY);
+        onPointerDown(e.clientX, e.clientY, e.pointerId);
       }}
     >
       <div className="thumb-media-box">
@@ -242,6 +248,11 @@ function ThumbCard({
             e.stopPropagation();
             onOpen();
           }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+            }
+          }}
         >
           {entry.kind === "group" ? (
             <BookOpen size={13} />
@@ -283,6 +294,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     fitMode,
     isDraggingOsFiles,
     isTrashView,
+    trashCount,
     hasActiveFilters = false,
     onResetFilters,
     currentFolderId,
@@ -443,7 +455,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
             <div style={{ display: "flex", gap: 8 }}>
               <button type="button" className="btn" onClick={onRestoreAllTrash}>
                 <RotateCcw size={13} />
-                すべて復元
+                {hasActiveFilters ? `表示中の ${entries.length} 件を復元` : "すべて復元"}
               </button>
               <button
                 type="button"
@@ -555,7 +567,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
                           e.preventDefault();
                           onCardContextMenu(entry, e.clientX, e.clientY);
                         }}
-                        onPointerDown={(x, y) => onBeginEntryDrag(entry, x, y)}
+                        onPointerDown={(x, y, pointerId) => onBeginEntryDrag(entry, x, y, pointerId)}
                         onAvifCompleted={onAvifCompleted}
                       />
                     );
@@ -653,6 +665,16 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
           <h2 id="empty-trash-title">ゴミ箱を空にしますか？</h2>
           <p>
             ゴミ箱内のすべての単体画像と漫画グループを保管庫から復元できない形で完全に消去します。この操作は取り消せません。
+            {hasActiveFilters && (
+              <>
+                <br />
+                <strong style={{ color: "var(--danger)" }}>
+                  {trashCount !== undefined && trashCount > entries.length
+                    ? `※ 現在の絞り込み条件で非表示になっている残り ${trashCount - entries.length} 件を含む、ゴミ箱内の全 ${trashCount} 件が完全に削除されます。`
+                    : "※ 絞り込み中で表示されていないアイテムも含め、ゴミ箱内のすべての項目が完全に削除されます。"}
+                </strong>
+              </>
+            )}
           </p>
           <form method="dialog" className="confirm-dialog-actions">
             <button type="submit" value="cancel" className="btn" autoFocus>

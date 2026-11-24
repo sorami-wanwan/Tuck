@@ -16,10 +16,15 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+function hasOpenModalDialog(): boolean {
+  return typeof document !== "undefined" && document.querySelector("dialog[open]") !== null;
+}
+
 interface UseImportFlowOptions {
   isOpen: boolean;
   canEdit: boolean;
   isWebClient: boolean;
+  isTrashView: boolean;
   currentFolderId: string | null;
   autoUrlImportEnabled: boolean;
   lockSettingsOpen: boolean;
@@ -35,6 +40,7 @@ export function useImportFlow({
   isOpen,
   canEdit,
   isWebClient,
+  isTrashView,
   currentFolderId,
   autoUrlImportEnabled,
   lockSettingsOpen,
@@ -190,15 +196,26 @@ export function useImportFlow({
       if (res.group) {
         const gk = entryKey({ kind: "group", id: res.group.id });
         onSelectImportedKey(gk);
+        const notes: string[] = [];
+        if (res.report.duplicateCount > 0) {
+          notes.push(`${res.report.duplicateCount}件は重複スキップ`);
+        }
+        if (res.report.skippedUnsupportedCount > 0) {
+          notes.push(`${res.report.skippedUnsupportedCount}件は非対応・動画スキップ`);
+        }
+        const suffix = notes.length > 0 ? `（${notes.join("、")}）` : "";
         pushToast(
           "success",
-          `「${res.group.title}」（${res.group.pageCount}ページ）を取り込みました`
+          `「${res.group.title}」（${res.group.pageCount}ページ）を取り込みました${suffix}`
         );
+        if (res.report.errors.length > 0) {
+          pushToast("warning", res.report.errors[0]);
+        }
+        await refreshLibrary();
+        processPendingThumbnails(res.report.avifPendingIds, res.report.videoPendingIds);
       } else {
         await handleImportReport(res.report);
       }
-      await refreshLibrary();
-      processPendingThumbnails(res.report.avifPendingIds, res.report.videoPendingIds);
     } catch (err) {
       pushToast("error", formatErrorMessage(err));
     }
@@ -235,7 +252,7 @@ export function useImportFlow({
     window.addEventListener("dragover", prevent);
     window.addEventListener("drop", prevent);
 
-    if (!isOpen || !canEdit) {
+    if (!isOpen || !canEdit || isTrashView) {
       setIsDraggingOsFiles(false);
       return () => {
         window.removeEventListener("dragover", prevent);
@@ -246,6 +263,11 @@ export function useImportFlow({
     if (isWebClient) {
       let dragDepth = 0;
       const onDragEnter = (e: DragEvent) => {
+        if (hasOpenModalDialog()) {
+          dragDepth = 0;
+          setIsDraggingOsFiles(false);
+          return;
+        }
         if (e.dataTransfer?.types.includes("Files")) {
           dragDepth += 1;
           setIsDraggingOsFiles(true);
@@ -260,6 +282,7 @@ export function useImportFlow({
       const onDropFiles = (e: DragEvent) => {
         dragDepth = 0;
         setIsDraggingOsFiles(false);
+        if (hasOpenModalDialog()) return;
         const files = Array.from(e.dataTransfer?.files ?? []);
         if (files.length === 0) return;
         void uploadBrowserFiles(files, currentFolderId)
@@ -284,6 +307,10 @@ export function useImportFlow({
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         if (!active) return;
+        if (hasOpenModalDialog()) {
+          setIsDraggingOsFiles(false);
+          return;
+        }
         if (event.payload.type === "enter" || event.payload.type === "over") {
           setIsDraggingOsFiles(true);
         } else if (event.payload.type === "leave") {
@@ -315,6 +342,7 @@ export function useImportFlow({
     isOpen,
     canEdit,
     isWebClient,
+    isTrashView,
     currentFolderId,
     handleImportReport,
     uploadBrowserFiles,
@@ -323,14 +351,15 @@ export function useImportFlow({
 
   // Global clipboard paste (Cmd/Ctrl+V)
   useEffect(() => {
-    if (!isOpen || !canEdit) return;
+    if (!isOpen || !canEdit || isTrashView) return;
 
     const handlePaste = async (e: ClipboardEvent) => {
       if (
         isEditableTarget(e.target) ||
         isEditableTarget(document.activeElement) ||
         urlImportDialog.open ||
-        lockSettingsOpen
+        lockSettingsOpen ||
+        hasOpenModalDialog()
       ) {
         return;
       }
@@ -373,7 +402,8 @@ export function useImportFlow({
         isEditableTarget(e.target) ||
         isEditableTarget(document.activeElement) ||
         urlImportDialog.open ||
-        lockSettingsOpen
+        lockSettingsOpen ||
+        hasOpenModalDialog()
       ) {
         return;
       }
@@ -399,6 +429,7 @@ export function useImportFlow({
     isOpen,
     canEdit,
     isWebClient,
+    isTrashView,
     autoUrlImportEnabled,
     urlImportDialog.open,
     lockSettingsOpen,

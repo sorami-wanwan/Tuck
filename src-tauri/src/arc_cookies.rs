@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 #[cfg(any(target_os = "macos", test))]
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ use pbkdf2::pbkdf2_hmac;
 use rusqlite::{params_from_iter, types::Value, Connection, OpenFlags};
 #[cfg(any(target_os = "macos", test))]
 use sha1::Sha1;
+#[cfg(any(target_os = "macos", test))]
+use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "macos", test))]
 use uuid::Uuid;
 #[cfg(any(target_os = "macos", test))]
@@ -35,7 +37,7 @@ type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 pub(crate) struct DecryptedCookie {
     pub host_key: String,
     pub name: String,
-    pub value: String,
+    pub value: Zeroizing<String>,
     pub path: String,
     pub is_secure: bool,
     pub expires_utc: i64,
@@ -154,15 +156,18 @@ mod macos_impl {
     }
 
     fn registrable_base_domain(host: &str) -> String {
+        if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+            return String::new();
+        }
         let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
         if parts.len() <= 2 {
             return parts.join(".");
         }
         let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
         let second_level_tlds = [
-            "co.jp", "ne.jp", "or.jp", "go.jp", "ac.jp", "ed.jp", "gr.jp", "lg.jp", "co.uk",
-            "org.uk", "ac.uk", "com.au", "net.au", "org.au", "co.kr", "com.tw", "com.hk", "com.br",
-            "com.cn", "co.nz",
+            "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "co.uk", "org.uk", "ac.uk", "com.au",
+            "net.au", "org.au", "co.kr", "com.tw", "com.cn", "com.br", "com.mx", "co.nz", "co.in",
+            "com.sg", "com.hk", "co.id", "com.th", "com.vn",
         ];
         if second_level_tlds.contains(&last_two.as_str()) && parts.len() >= 3 {
             format!(
@@ -182,7 +187,7 @@ mod macos_impl {
 
     pub(super) fn target_cookie_domains(raw_url: &str) -> Vec<String> {
         let host = extract_url_host(raw_url);
-        if host.is_empty() {
+        if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
             return Vec::new();
         }
         if host_matches(&host, "x.com")
@@ -217,7 +222,8 @@ mod macos_impl {
         encrypted_value: &[u8],
         key: &[u8; 16],
         meta_version: i64,
-    ) -> Option<String> {
+        host_key: &str,
+    ) -> Option<Zeroizing<String>> {
         if encrypted_value.is_empty() {
             return None;
         }
@@ -226,7 +232,7 @@ mod macos_impl {
             if s.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
                 return None;
             }
-            return Some(s.to_string());
+            return Some(Zeroizing::new(s.to_string()));
         }
 
         let ciphertext = &encrypted_value[3..];
@@ -243,6 +249,10 @@ mod macos_impl {
             if plain.len() < 32 {
                 return None;
             }
+            let expected_hash = Sha256::digest(host_key.as_bytes());
+            if plain[..32] != expected_hash[..] {
+                return None;
+            }
             &plain[32..]
         } else {
             plain
@@ -252,7 +262,15 @@ mod macos_impl {
         if s.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
             return None;
         }
-        Some(s.to_string())
+        Some(Zeroizing::new(s.to_string()))
+    }
+
+    fn current_chromium_utc_micros() -> i64 {
+        let unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        (unix_secs + 11_644_473_600) * 1_000_000
     }
 
     fn chromium_expires_to_unix(expires_utc: i64) -> i64 {
@@ -296,7 +314,7 @@ mod macos_impl {
             let exp = chromium_expires_to_unix(c.expires_utc);
             out.push_str(&format!(
                 "{domain}\t{include_subdomains}\t{path}\t{secure}\t{exp}\t{name}\t{}\n",
-                c.value
+                c.value.as_str()
             ));
         }
         out
@@ -446,6 +464,7 @@ mod macos_impl {
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(params_vec))?;
 
+        let now_chromium = current_chromium_utc_micros();
         let mut out = Vec::new();
         let mut decrypt_failures = 0usize;
         while let Some(row) = rows.next()? {
@@ -458,10 +477,14 @@ mod macos_impl {
             let is_secure = row.get::<_, i64>(6).unwrap_or(0) != 0;
             let last_access_utc = row.get::<_, i64>(7).unwrap_or(0);
 
+            if expires_utc > 0 && expires_utc <= now_chromium {
+                continue;
+            }
+
             let value = if !plain_val.is_empty() {
-                plain_val
+                Zeroizing::new(plain_val)
             } else if !enc_val.is_empty() {
-                match decrypt_chromium_v10_cookie(&enc_val, key, meta_version) {
+                match decrypt_chromium_v10_cookie(&enc_val, key, meta_version, &host_key) {
                     Some(v) => v,
                     None => {
                         decrypt_failures += 1;
@@ -469,7 +492,7 @@ mod macos_impl {
                     }
                 }
             } else {
-                String::new()
+                Zeroizing::new(String::new())
             };
 
             if value.is_empty() {
@@ -580,20 +603,26 @@ mod macos_impl {
 use macos_impl::*;
 
 #[cfg(target_os = "macos")]
+enum KeychainLookupError {
+    ItemNotFound(VaultError),
+    Abort(VaultError),
+}
+
+#[cfg(target_os = "macos")]
 fn run_security_find_password(
     args: &[&str],
     cancel: &AtomicBool,
-) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+) -> Result<Zeroizing<Vec<u8>>, KeychainLookupError> {
     let mut child = Command::new("/usr/bin/security")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            VaultError::UrlImport(format!(
+            KeychainLookupError::Abort(VaultError::UrlImport(format!(
                 "macOS キーチェーン照会（/usr/bin/security）の起動に失敗しました: {e}"
-            ))
+            )))
         })?;
 
     let started = Instant::now();
@@ -601,16 +630,31 @@ fn run_security_find_password(
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(VaultError::UrlImport(
+            return Err(KeychainLookupError::Abort(VaultError::UrlImport(
                 "取り込みをキャンセルしました".to_string(),
-            ));
+            )));
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| KeychainLookupError::Abort(VaultError::Io(e)))?
+        {
             if !status.success() {
-                return Err(VaultError::UrlImport(
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_end(&mut stderr_buf);
+                }
+                let stderr_text = String::from_utf8_lossy(&stderr_buf).to_ascii_lowercase();
+                let err = VaultError::UrlImport(
                     "Arc Browser のキーチェーン（Arc Safe Storage）へのアクセスに失敗しました。\nmacOS の許可ダイアログで「常に許可」を選択するか、設定画面で cookies.txt をお試しください"
                         .to_string(),
-                ));
+                );
+                if status.code() == Some(44)
+                    || stderr_text.contains("could not be found in the keychain")
+                {
+                    return Err(KeychainLookupError::ItemNotFound(err));
+                }
+                return Err(KeychainLookupError::Abort(err));
             }
             let mut out = Zeroizing::new(Vec::new());
             if let Some(mut stdout) = child.stdout.take() {
@@ -621,19 +665,19 @@ fn run_security_find_password(
                 out.pop();
             }
             if out.is_empty() {
-                return Err(VaultError::UrlImport(
+                return Err(KeychainLookupError::Abort(VaultError::UrlImport(
                     "Arc Browser のキーチェーン（Arc Safe Storage）から鍵を取得できませんでした"
                         .to_string(),
-                ));
+                )));
             }
             return Ok(out);
         }
         if started.elapsed() > Duration::from_secs(60) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(VaultError::UrlImport(
+            return Err(KeychainLookupError::Abort(VaultError::UrlImport(
                 "macOS キーチェーンの承認待ちがタイムアウトしました（60秒）".to_string(),
-            ));
+            )));
         }
         std::thread::sleep(Duration::from_millis(120));
     }
@@ -653,7 +697,8 @@ fn fetch_arc_safe_storage_password(cancel: &AtomicBool) -> Result<Zeroizing<Vec<
         cancel,
     ) {
         Ok(pw) => Ok(pw),
-        Err(err) => {
+        Err(KeychainLookupError::Abort(err)) => Err(err),
+        Err(KeychainLookupError::ItemNotFound(err)) => {
             if cancel.load(Ordering::SeqCst) {
                 return Err(err);
             }
@@ -803,6 +848,8 @@ mod tests {
             target_cookie_domains("https://video.example.co.jp/watch/1"),
             vec!["example.co.jp"]
         );
+        assert!(target_cookie_domains("http://192.168.1.10:8080/video.mp4").is_empty());
+        assert!(target_cookie_domains("http://[::1]:8080/video.mp4").is_empty());
     }
 
     #[test]
@@ -811,20 +858,28 @@ mod tests {
 
         let enc_v24 = make_synthetic_v10_cookie(&key, true, ".x.com", "token_xyz_123");
         assert_eq!(
-            decrypt_chromium_v10_cookie(&enc_v24, &key, 24).as_deref(),
+            decrypt_chromium_v10_cookie(&enc_v24, &key, 24, ".x.com")
+                .as_deref()
+                .map(String::as_str),
             Some("token_xyz_123")
+        );
+        assert_eq!(
+            decrypt_chromium_v10_cookie(&enc_v24, &key, 24, ".evil.example"),
+            None
         );
 
         let enc_legacy = make_synthetic_v10_cookie(&key, false, ".x.com", "legacy_val");
         assert_eq!(
-            decrypt_chromium_v10_cookie(&enc_legacy, &key, 23).as_deref(),
+            decrypt_chromium_v10_cookie(&enc_legacy, &key, 23, ".x.com")
+                .as_deref()
+                .map(String::as_str),
             Some("legacy_val")
         );
 
         let netscape = format_netscape_cookies(&[DecryptedCookie {
             host_key: ".x.com".to_string(),
             name: "auth_token".to_string(),
-            value: "token_xyz_123".to_string(),
+            value: Zeroizing::new("token_xyz_123".to_string()),
             path: "/".to_string(),
             is_secure: true,
             expires_utc: 13_800_000_000_000_000, // 2038-ish in WebKit microseconds
@@ -875,7 +930,7 @@ mod tests {
             ],
         );
 
-        // Profile 2: authenticated X session (auth_token + ct0)
+        // Profile 2: authenticated X session (auth_token + ct0 + expired session cookie)
         create_synthetic_cookies_db(
             &user_data.join("Profile 2/Cookies"),
             24,
@@ -895,6 +950,15 @@ mod tests {
                     make_synthetic_v10_cookie(&key, true, ".twitter.com", "csrf_123"),
                     "/",
                     13_800_000_000_000_000,
+                    1,
+                    500,
+                ),
+                (
+                    ".x.com",
+                    "expired_token",
+                    make_synthetic_v10_cookie(&key, true, ".x.com", "should_be_skipped"),
+                    "/",
+                    12_000_000_000_000_000,
                     1,
                     500,
                 ),
@@ -920,10 +984,10 @@ mod tests {
         assert_eq!(extracted.len(), 2);
         assert!(extracted
             .iter()
-            .any(|c| c.name == "auth_token" && c.value == "real_auth_token_abc"));
+            .any(|c| c.name == "auth_token" && c.value.as_str() == "real_auth_token_abc"));
         assert!(extracted
             .iter()
-            .any(|c| c.name == "ct0" && c.value == "csrf_123"));
+            .any(|c| c.name == "ct0" && c.value.as_str() == "csrf_123"));
         assert!(!extracted.iter().any(|c| c.host_key.contains("otherbank")));
         assert!(!extracted.iter().any(|c| c.host_key.contains("unrelated")));
     }

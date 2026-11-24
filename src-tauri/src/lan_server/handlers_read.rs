@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::error::VaultError;
+use crate::imaging::is_video_mime;
 use crate::media_stream::resolve_media_slice;
 use crate::models::{
     EntryKind, EntryRef, SearchQuery, VaultStatus, WebBatchExportRequest,
@@ -92,7 +93,11 @@ pub(super) async fn handle_vault_status(
     headers: HeaderMap,
 ) -> Result<Json<VaultStatus>, LanApiError> {
     require_read_checked(&runtime, &headers)?;
-    let status = runtime.app_state.current_status().map_err(error_response)?;
+    let state_clone = runtime.app_state.clone();
+    let status = tokio::task::spawn_blocking(move || state_clone.current_status())
+        .await
+        .map_err(|e| error_response(VaultError::LanShare(e.to_string())))?
+        .map_err(error_response)?;
     Ok(Json(sanitize_vault_status(status)))
 }
 
@@ -168,7 +173,16 @@ pub(super) async fn handle_get_image(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response, LanApiError> {
     require_read_checked(&runtime, &headers)?;
-    let (mime_type, bytes) = run_db(&runtime, move |db| db.get_media_blob_with_mime(&id)).await?;
+    let (mime_type, bytes) = run_db(&runtime, move |db| {
+        let (mime, byte_size, chunk_size) = db.get_media_info(&id)?;
+        if chunk_size > 0 || is_video_mime(&mime) || byte_size > 64 * 1024 * 1024 {
+            return Err(VaultError::InvalidInput(
+                "動画や大容量メディアはストリーミングAPIを使用してください".to_string(),
+            ));
+        }
+        db.get_media_blob_with_mime(&id)
+    })
+    .await?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime_type)

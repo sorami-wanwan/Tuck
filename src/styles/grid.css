@@ -862,6 +862,11 @@
   gap: 2px;
 }
 
+.context-submenu.open-left {
+  inset-inline-start: auto;
+  inset-inline-end: calc(100% + 4px);
+}
+
 /* Drag Ghost Pill */
 .drag-ghost {
   position: fixed;

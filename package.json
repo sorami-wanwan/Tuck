@@ -18,7 +18,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "test:web": "vitest run",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test": "vitest run && cargo test --manifest-path src-tauri/Cargo.toml",
     "test:docker": "docker compose -f docker/compose.test.yml run --rm --build linux-test",
     "clean:incremental": "rm -rf src-tauri/target/debug/incremental"
   },
@@ -35,7 +37,9 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.3.0",
+    "happy-dom": "^21.0.4",
     "typescript": "^5.8.0",
-    "vite": "^8.3.8"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   }
 }

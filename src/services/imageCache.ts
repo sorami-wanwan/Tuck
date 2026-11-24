@@ -14,6 +14,10 @@ class LruUrlCache {
     this.limit = limit;
   }
 
+  peek(key: string): string | undefined {
+    return this.map.get(key);
+  }
+
   get(key: string): string | undefined {
     const val = this.map.get(key);
     if (val === undefined) return undefined;
@@ -92,6 +96,10 @@ class ImageMemoryCache {
     return this.thumbs.get(itemId);
   }
 
+  getCachedFullImageUrl(itemId: string): string | undefined {
+    return this.fulls.peek(itemId);
+  }
+
   getThumbnailUrl(itemId: string): Promise<string> {
     const cached = this.thumbs.get(itemId);
     if (cached) return Promise.resolve(cached);
@@ -103,7 +111,7 @@ class ImageMemoryCache {
     const promise = vaultApi
       .fetchThumbnailBytes(itemId)
       .then((buf) => {
-        if (this.epoch !== currentEpoch) {
+        if (this.epoch !== currentEpoch || this.inflightThumbs.get(itemId) !== promise) {
           throw new Error("Vault closed");
         }
         const blob = new Blob([buf], { type: "image/webp" });
@@ -112,7 +120,9 @@ class ImageMemoryCache {
         return url;
       })
       .finally(() => {
-        this.inflightThumbs.delete(itemId);
+        if (this.inflightThumbs.get(itemId) === promise) {
+          this.inflightThumbs.delete(itemId);
+        }
       });
 
     this.inflightThumbs.set(itemId, promise);
@@ -130,7 +140,7 @@ class ImageMemoryCache {
     const promise = vaultApi
       .fetchImageBytes(itemId)
       .then((buf) => {
-        if (this.epoch !== currentEpoch) {
+        if (this.epoch !== currentEpoch || this.inflightFulls.get(itemId) !== promise) {
           throw new Error("Vault closed");
         }
         const blob = new Blob([buf], { type: mimeType });
@@ -139,7 +149,9 @@ class ImageMemoryCache {
         return url;
       })
       .finally(() => {
-        this.inflightFulls.delete(itemId);
+        if (this.inflightFulls.get(itemId) === promise) {
+          this.inflightFulls.delete(itemId);
+        }
       });
 
     this.inflightFulls.set(itemId, promise);
@@ -197,7 +209,9 @@ class ImageMemoryCache {
         bitmap.close();
       }
     })().finally(() => {
-      this.inflightAvif.delete(itemId);
+      if (this.inflightAvif.get(itemId) === promise) {
+        this.inflightAvif.delete(itemId);
+      }
     });
 
     this.inflightAvif.set(itemId, promise);
@@ -341,7 +355,9 @@ class ImageMemoryCache {
       this.thumbs.delete(itemId);
       return updated;
     })().finally(() => {
-      this.inflightVideo.delete(itemId);
+      if (this.inflightVideo.get(itemId) === promise) {
+        this.inflightVideo.delete(itemId);
+      }
     });
 
     this.inflightVideo.set(itemId, promise);
@@ -352,18 +368,24 @@ class ImageMemoryCache {
     for (const id of itemIds) {
       this.thumbs.delete(id);
       this.fulls.delete(id);
+      this.inflightThumbs.delete(id);
+      this.inflightFulls.delete(id);
     }
   }
 
-  revokeAll(): void {
+  clearAll(): void {
     this.epoch += 1;
-    this.lanMediaToken = null;
     this.thumbs.clear();
     this.fulls.clear();
     this.inflightThumbs.clear();
     this.inflightFulls.clear();
     this.inflightAvif.clear();
     this.inflightVideo.clear();
+  }
+
+  revokeAll(): void {
+    this.clearAll();
+    this.lanMediaToken = null;
   }
 }
 

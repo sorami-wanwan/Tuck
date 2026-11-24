@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::VaultDb;
@@ -19,6 +19,8 @@ pub struct CachedMediaBlob {
 #[derive(Clone, Default)]
 pub struct AppState {
     pub db: Arc<Mutex<Option<VaultDb>>>,
+    pub vault_open: Arc<AtomicBool>,
+    pub media_cache_epoch: Arc<AtomicU64>,
     pub locked_path: Arc<Mutex<Option<PathBuf>>>,
     pub clipboard_watch_enabled: Arc<AtomicBool>,
     pub clipboard_last_hash: Arc<Mutex<Option<String>>>,
@@ -34,8 +36,20 @@ impl AppState {
             .map_err(|_| VaultError::InvalidInput("内部状態ロックの取得に失敗しました".to_string()))
     }
 
+    pub fn set_db(&self, db: Option<VaultDb>) -> Result<(), VaultError> {
+        let is_some = db.is_some();
+        if !is_some {
+            self.vault_open.store(false, Ordering::SeqCst);
+            self.clear_media_cache();
+        }
+        let mut guard = self.lock_db()?;
+        *guard = db;
+        self.vault_open.store(is_some, Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn is_open(&self) -> bool {
-        self.db.lock().map(|g| g.is_some()).unwrap_or(false)
+        self.vault_open.load(Ordering::SeqCst)
     }
 
     pub fn can_unlock(&self) -> bool {
@@ -53,6 +67,7 @@ impl AppState {
     }
 
     pub fn clear_media_cache(&self) {
+        self.media_cache_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut cache) = self.media_cache.lock() {
             cache.clear();
         }
@@ -62,6 +77,7 @@ impl AppState {
         if item_ids.is_empty() {
             return;
         }
+        self.media_cache_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut cache) = self.media_cache.lock() {
             cache.retain(|entry| !item_ids.iter().any(|id| id == &entry.item_id));
         }
@@ -79,6 +95,7 @@ impl AppState {
             }
         }
 
+        let epoch = self.media_cache_epoch.load(Ordering::SeqCst);
         let (mime_type, raw_bytes) = {
             let guard = self.lock_db()?;
             let db = guard.as_ref().ok_or(VaultError::VaultNotOpen)?;
@@ -86,17 +103,21 @@ impl AppState {
         };
 
         let bytes = Arc::new(raw_bytes);
-        if let Ok(mut cache) = self.media_cache.lock() {
-            if let Some(pos) = cache.iter().position(|e| e.item_id == item_id) {
-                cache.remove(pos);
-            }
-            cache.push(CachedMediaBlob {
-                item_id: item_id.to_string(),
-                mime_type: mime_type.clone(),
-                bytes: Arc::clone(&bytes),
-            });
-            while cache.len() > MEDIA_RAM_CACHE_LIMIT {
-                cache.remove(0);
+        if self.is_open() && self.media_cache_epoch.load(Ordering::SeqCst) == epoch {
+            if let Ok(mut cache) = self.media_cache.lock() {
+                if self.is_open() && self.media_cache_epoch.load(Ordering::SeqCst) == epoch {
+                    if let Some(pos) = cache.iter().position(|e| e.item_id == item_id) {
+                        cache.remove(pos);
+                    }
+                    cache.push(CachedMediaBlob {
+                        item_id: item_id.to_string(),
+                        mime_type: mime_type.clone(),
+                        bytes: Arc::clone(&bytes),
+                    });
+                    while cache.len() > MEDIA_RAM_CACHE_LIMIT {
+                        cache.remove(0);
+                    }
+                }
             }
         }
 
@@ -184,6 +205,19 @@ impl AppState {
         }
     }
 
+    pub fn stop_lan_share_if_same(&self, target: &LanServerHandle, reason: &str) {
+        let handle = self.lan_server.lock().ok().and_then(|mut g| {
+            if g.as_ref().is_some_and(|cur| cur.same_instance(target)) {
+                g.take()
+            } else {
+                None
+            }
+        });
+        if let Some(h) = handle {
+            h.stop(reason);
+        }
+    }
+
     pub fn notify_lan_library_changed(&self) {
         let handle = self.lan_server.lock().ok().and_then(|g| g.clone());
         if let Some(h) = handle {
@@ -200,6 +234,7 @@ impl AppState {
 
     /// Stops any active LAN server, drops the open DB handle, purges RAM media cache, and stops clipboard watch while retaining path for password unlock.
     pub fn lock_vault(&self) {
+        self.vault_open.store(false, Ordering::SeqCst);
         self.stop_lan_share_with_reason("vault_locked");
         self.stop_clipboard_watch();
         self.cancel_url_import();

@@ -1,53 +1,60 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Folder, Hash } from "lucide-react";
-import { BulkTagDialog } from "./components/BulkTagDialog";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { ContextMenu } from "./components/ContextMenu";
-import { GroupEditorDialog } from "./components/GroupEditorDialog";
+import { DragGhost } from "./components/DragGhost";
 import { Inspector } from "./components/Inspector";
 import { LanAuthScreen } from "./components/LanAuthScreen";
-import { LanShareDialog } from "./components/LanShareDialog";
-import { LightboxDialog } from "./components/LightboxDialog";
-import { LockSettingsDialog } from "./components/LockSettingsDialog";
-import { MangaReaderDialog } from "./components/MangaReaderDialog";
 import { PlainExportConfirmDialog } from "./components/PlainExportConfirmDialog";
 import { Sidebar } from "./components/Sidebar";
 import { ThumbnailGrid } from "./components/ThumbnailGrid";
 import { ToastRegion } from "./components/ToastRegion";
 import { Toolbar } from "./components/Toolbar";
-import { UrlImportDialog } from "./components/UrlImportDialog";
 import { VaultGate } from "./components/VaultGate";
 import { VaultLockScreen } from "./components/VaultLockScreen";
-import {
-  VaultMaintenanceDialog,
-  type MaintenanceTab,
-} from "./components/VaultMaintenanceDialog";
+import type { MaintenanceTab } from "./components/VaultMaintenanceDialog";
 import { useGallerySelection } from "./hooks/useGallerySelection";
 import { useImportFlow } from "./hooks/useImportFlow";
 import { useInternalDrag } from "./hooks/useInternalDrag";
+import { useLibraryMutations } from "./hooks/useLibraryMutations";
+import { useLibraryView } from "./hooks/useLibraryView";
 import { usePlainExport } from "./hooks/usePlainExport";
 import { useToasts } from "./hooks/useToasts";
 import { useVaultSession } from "./hooks/useVaultSession";
-import { imageMemoryCache } from "./services/imageCache";
 import { formatErrorMessage, vaultApi } from "./services/vaultApi";
-import { sortImagesOldestFirst } from "./utils/groupOrder";
-import { pruneMimeTypesForMediaFilter } from "./utils/mediaFilter";
 import {
   entryKey,
+  isVideoMime,
   type EntryRef,
-  type FolderNode,
   type GalleryEntry,
   type LockSettings,
-  type MediaFilter,
-  type QueryScope,
-  type SearchQuery,
-  type SortBy,
-  type TagWithCount,
-  type ThumbFitMode,
   type UrlImportSettings,
-  type ViewSelection,
 } from "./types/vault";
 
-const INITIAL_VIEW: ViewSelection = { kind: "all" };
+const BulkTagDialog = lazy(() =>
+  import("./components/BulkTagDialog").then((m) => ({ default: m.BulkTagDialog }))
+);
+const GroupEditorDialog = lazy(() =>
+  import("./components/GroupEditorDialog").then((m) => ({ default: m.GroupEditorDialog }))
+);
+const LanShareDialog = lazy(() =>
+  import("./components/LanShareDialog").then((m) => ({ default: m.LanShareDialog }))
+);
+const LightboxDialog = lazy(() =>
+  import("./components/LightboxDialog").then((m) => ({ default: m.LightboxDialog }))
+);
+const LockSettingsDialog = lazy(() =>
+  import("./components/LockSettingsDialog").then((m) => ({ default: m.LockSettingsDialog }))
+);
+const MangaReaderDialog = lazy(() =>
+  import("./components/MangaReaderDialog").then((m) => ({ default: m.MangaReaderDialog }))
+);
+const UrlImportDialog = lazy(() =>
+  import("./components/UrlImportDialog").then((m) => ({ default: m.UrlImportDialog }))
+);
+const VaultMaintenanceDialog = lazy(() =>
+  import("./components/VaultMaintenanceDialog").then((m) => ({
+    default: m.VaultMaintenanceDialog,
+  }))
+);
 
 export function App() {
   const { toasts, pushToast, dismissToast } = useToasts();
@@ -79,17 +86,8 @@ export function App() {
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [mobileSelectMode, setMobileSelectMode] = useState(false);
 
-  const [entries, setEntries] = useState<GalleryEntry[]>([]);
-  const [folders, setFolders] = useState<FolderNode[]>([]);
-  const [tags, setTags] = useState<TagWithCount[]>([]);
-
   const [lockSettingsOpen, setLockSettingsOpen] = useState(false);
   const [bulkTagDialogOpen, setBulkTagDialogOpen] = useState(false);
-  const [batchRatingBusy, setBatchRatingBusy] = useState(false);
-  const batchRatingBusyRef = useRef(false);
-  const applyBatchRatingRef = useRef<(entries: EntryRef[], rating: number) => Promise<void>>(
-    async () => {}
-  );
   const [maintenanceModal, setMaintenanceModal] = useState<{
     open: boolean;
     initialTab: MaintenanceTab;
@@ -102,88 +100,30 @@ export function App() {
     preselectedEntries: [],
   });
 
-  const [history, setHistory] = useState<ViewSelection[]>([INITIAL_VIEW]);
-  const [historyIndex, setHistoryIndex] = useState(0);
-  const view = history[historyIndex] ?? INITIAL_VIEW;
-
-  const [sidebarFilter, setSidebarFilter] = useState("");
-  const [searchText, setSearchText] = useState("");
-  const [sortBy, setSortBy] = useState<SortBy>("createdDesc");
-  const [mediaType, setMediaType] = useState<MediaFilter>("all");
-  const [minRating, setMinRating] = useState<number | null>(null);
-  const [mimeTypes, setMimeTypes] = useState<string[]>([]);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const refreshSeqRef = useRef(0);
-
   const [thumbSize, setThumbSize] = useState(210);
-  const [fitMode, setFitMode] = useState<ThumbFitMode>("ratio");
+  const [fitMode, setFitMode] = useState<"ratio" | "square">("ratio");
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window !== "undefined" ? !window.matchMedia("(max-width: 1023px)").matches : true
   );
 
-  const currentFolderId = view.kind === "folder" ? view.folderId : null;
-  const isTrashView = view.kind === "trash";
-
-  const currentQuery: SearchQuery = useMemo(() => {
-    const scope: QueryScope = view.kind === "tags" ? { kind: "all" } : view;
-    return {
-      scope,
-      tagNames: view.kind === "tags" ? view.tags : [],
-      minRating,
-      mediaType,
-      mimeTypes,
-      text: searchText,
-      sortBy,
-    };
-  }, [view, minRating, mediaType, mimeTypes, searchText, sortBy]);
-
-  const handleMediaTypeChange = useCallback((next: MediaFilter) => {
-    setMediaType(next);
-    setMimeTypes((prev) => pruneMimeTypesForMediaFilter(prev, next));
-  }, []);
-
-  const hasActiveFilters =
-    mediaType !== "all" ||
-    minRating !== null ||
-    mimeTypes.length > 0 ||
-    searchText.trim().length > 0;
-
-  const handleResetFilters = useCallback(() => {
-    setMediaType("all");
-    setMinRating(null);
-    setMimeTypes([]);
-    setSearchText("");
-  }, []);
-
-  const refreshLibrary = useCallback(async () => {
-    if (!status.isOpen) return;
-    const seq = ++refreshSeqRef.current;
-    try {
-      const [nextStatus, nextFolders, nextTags, nextEntries] = await Promise.all([
-        vaultApi.getVaultStatus(),
-        vaultApi.listFolders(),
-        vaultApi.listTags(),
-        vaultApi.queryEntries(currentQuery),
-      ]);
-      if (seq !== refreshSeqRef.current) return;
-      setStatus(nextStatus);
-      setFolders(nextFolders);
-      setTags(nextTags);
-      setEntries(nextEntries);
-      syncSelectionRef.current(nextEntries);
-    } catch (err) {
-      if (seq !== refreshSeqRef.current) return;
-      pushToast("error", formatErrorMessage(err));
-    }
-  }, [status.isOpen, currentQuery, setStatus, pushToast]);
-
-  useEffect(() => {
-    if (!status.isOpen) return;
-    void refreshLibrary();
-  }, [status.isOpen, refreshLibrary]);
+  const libraryView = useLibraryView({
+    isOpen: status.isOpen,
+    setStatus,
+    pushToast,
+    onSyncSelection: (nextEntries) => syncSelectionRef.current(nextEntries),
+    onNavigate: () => {
+      setMobileDrawerOpen(false);
+      setBulkTagDialogOpen(false);
+    },
+  });
+  const { entries, folders, tags, view, currentFolderId, isTrashView, refreshLibrary } =
+    libraryView;
 
   refreshLibraryRef.current = refreshLibrary;
   const triggerRefreshLibrary = useCallback(() => refreshLibraryRef.current(), []);
+  const triggerBatchSetRatingRef = useRef<(targetEntries: EntryRef[], rating: number) => Promise<void>>(
+    async () => {}
+  );
 
   const handleOpenExportPackageForEntries = useCallback((selectedEntries: EntryRef[]) => {
     setMaintenanceModal({
@@ -194,9 +134,13 @@ export function App() {
     });
   }, []);
 
+  const handleOpenBulkTagDialog = useCallback(() => {
+    setBulkTagDialogOpen(true);
+  }, []);
+
   const triggerBatchSetRating = useCallback(
     (targetEntries: EntryRef[], rating: number) =>
-      applyBatchRatingRef.current(targetEntries, rating),
+      triggerBatchSetRatingRef.current(targetEntries, rating),
     []
   );
 
@@ -212,11 +156,40 @@ export function App() {
     refreshLibrary: triggerRefreshLibrary,
     onOpenExportPackageForEntries: handleOpenExportPackageForEntries,
     onPlainExport: requestPlainExport,
-    onOpenBulkTagDialog: () => setBulkTagDialogOpen(true),
+    onOpenBulkTagDialog: handleOpenBulkTagDialog,
     onBatchSetRating: triggerBatchSetRating,
     pushToast,
   });
   syncSelectionRef.current = gallery.syncSelectionWithEntries;
+
+  const importFlow = useImportFlow({
+    isOpen: status.isOpen,
+    canEdit,
+    isWebClient,
+    isTrashView,
+    currentFolderId,
+    autoUrlImportEnabled: status.urlImportSettings.enabled,
+    lockSettingsOpen,
+    refreshLibrary: triggerRefreshLibrary,
+    onSelectImportedKey: gallery.selectSingleKey,
+    pushToast,
+  });
+
+  const mutations = useLibraryMutations({
+    entries,
+    folders,
+    view,
+    currentFolderId,
+    hasActiveFilters: libraryView.hasActiveFilters,
+    navigateView: libraryView.navigateView,
+    refreshLibrary,
+    setStatus,
+    pushToast,
+    uploadBrowserFiles: importFlow.uploadBrowserFiles,
+    processPendingThumbnails: importFlow.processPendingThumbnails,
+    gallery,
+  });
+  triggerBatchSetRatingRef.current = mutations.triggerBatchSetRating;
 
   const handlePlainExportSelection = useCallback(() => {
     if (gallery.inspectorMode === "image" && gallery.itemDetail) {
@@ -288,28 +261,12 @@ export function App() {
     [folders, requestPlainExport]
   );
 
-  const importFlow = useImportFlow({
-    isOpen: status.isOpen,
-    canEdit,
-    isWebClient,
-    currentFolderId,
-    autoUrlImportEnabled: status.urlImportSettings.enabled,
-    lockSettingsOpen,
-    refreshLibrary: triggerRefreshLibrary,
-    onSelectImportedKey: gallery.selectSingleKey,
-    pushToast,
-  });
-
   resetWorkspaceRef.current = () => {
-    setEntries([]);
-    setFolders([]);
-    setTags([]);
     gallery.clearSelectionState();
     resetPlainExportState();
     setLockSettingsOpen(false);
     setBulkTagDialogOpen(false);
-    batchRatingBusyRef.current = false;
-    setBatchRatingBusy(false);
+    mutations.resetMutationState();
     setMobileDrawerOpen(false);
     setMobileSelectMode(false);
     importFlow.closeUrlImportDialog();
@@ -319,14 +276,7 @@ export function App() {
       preselectedFolderIds: [],
       preselectedEntries: [],
     });
-    refreshSeqRef.current += 1;
-    setSearchText("");
-    setSidebarFilter("");
-    setMediaType("all");
-    setMinRating(null);
-    setMimeTypes([]);
-    setHistory([INITIAL_VIEW]);
-    setHistoryIndex(0);
+    libraryView.resetLibraryViewState();
   };
 
   readOnlyEnforcedRef.current = () => {
@@ -369,180 +319,7 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileDrawerOpen]);
 
-  const navigateView = useCallback(
-    (next: ViewSelection) => {
-      setHistory((prev) => [...prev.slice(0, historyIndex + 1), next]);
-      setHistoryIndex((idx) => idx + 1);
-      setMobileDrawerOpen(false);
-    },
-    [historyIndex]
-  );
-
-  const toggleTagInView = useCallback(
-    (tagName: string) => {
-      const currentTags = view.kind === "tags" ? view.tags : [];
-      const exists = currentTags.some((t) => t.toLowerCase() === tagName.toLowerCase());
-      const nextTags = exists
-        ? currentTags.filter((t) => t.toLowerCase() !== tagName.toLowerCase())
-        : [...currentTags, tagName];
-      if (nextTags.length === 0) {
-        navigateView({ kind: "all" });
-      } else {
-        navigateView({ kind: "tags", tags: nextTags });
-      }
-    },
-    [view, navigateView]
-  );
-
-  const applyBatchTagUpdate = useCallback(
-    async (targetEntries: EntryRef[], addTags: string[], removeTags: string[]) => {
-      const report = await vaultApi.batchUpdateEntryTags(targetEntries, addTags, removeTags);
-      if (addTags.length === 1 && removeTags.length === 0) {
-        if (report.updatedCount > 0) {
-          pushToast("success", `「#${addTags[0]}」を ${report.updatedCount}件に付与しました`);
-        } else if (report.targetCount > 0) {
-          pushToast("info", `選択した項目にはすでに「#${addTags[0]}」が付いています`);
-        }
-      } else if (addTags.length === 0 && removeTags.length === 1) {
-        if (report.updatedCount > 0) {
-          pushToast("info", `「#${removeTags[0]}」を ${report.updatedCount}件から外しました`);
-        }
-      } else if (report.updatedCount > 0) {
-        pushToast("success", `${report.updatedCount}件のタグを更新しました`);
-      } else {
-        pushToast("info", "タグに変更はありませんでした");
-      }
-
-      if (gallery.selectedEntryRefs.length === 1) {
-        const singleRef = gallery.selectedEntryRefs[0];
-        if (targetEntries.some((t) => t.kind === singleRef.kind && t.id === singleRef.id)) {
-          if (singleRef.kind === "image") {
-            gallery.setItemDetail(await vaultApi.getItemDetail(singleRef.id));
-          } else {
-            gallery.setGroupDetail(await vaultApi.getGroupDetail(singleRef.id));
-          }
-        }
-      }
-
-      await refreshLibrary();
-    },
-    [
-      gallery.selectedEntryRefs,
-      gallery.setItemDetail,
-      gallery.setGroupDetail,
-      pushToast,
-      refreshLibrary,
-    ]
-  );
-
-  const applyBatchRatingUpdate = useCallback(
-    async (targetEntries: EntryRef[], rating: number) => {
-      if (targetEntries.length === 0 || batchRatingBusyRef.current) return;
-      batchRatingBusyRef.current = true;
-      setBatchRatingBusy(true);
-      try {
-        const report = await vaultApi.batchSetEntryRating(targetEntries, rating);
-        if (rating === 0) {
-          if (report.updatedCount > 0) {
-            pushToast("info", `${report.updatedCount}件の評価を解除しました`);
-          } else if (report.targetCount > 0) {
-            pushToast("info", "選択した項目はすでに未評価です");
-          }
-        } else if (report.updatedCount > 0) {
-          pushToast("success", `${report.updatedCount}件の評価を ★${rating} に設定しました`);
-        } else if (report.targetCount > 0) {
-          pushToast("info", `選択した項目はすでに ★${rating} です`);
-        }
-
-        if (gallery.selectedEntryRefs.length === 1) {
-          const singleRef = gallery.selectedEntryRefs[0];
-          if (targetEntries.some((t) => t.kind === singleRef.kind && t.id === singleRef.id)) {
-            if (singleRef.kind === "image") {
-              gallery.setItemDetail(await vaultApi.getItemDetail(singleRef.id));
-            } else {
-              gallery.setGroupDetail(await vaultApi.getGroupDetail(singleRef.id));
-            }
-          }
-        }
-
-        await refreshLibrary();
-      } catch (err) {
-        pushToast("error", formatErrorMessage(err));
-      } finally {
-        batchRatingBusyRef.current = false;
-        setBatchRatingBusy(false);
-      }
-    },
-    [
-      gallery.selectedEntryRefs,
-      gallery.setItemDetail,
-      gallery.setGroupDetail,
-      pushToast,
-      refreshLibrary,
-    ]
-  );
-  applyBatchRatingRef.current = applyBatchRatingUpdate;
-
-  const internalDrag = useInternalDrag({
-    onDropEntriesToFolder: (refs, folderId) => {
-      void vaultApi
-        .addEntriesToFolder(folderId, refs)
-        .then(() => {
-          const fname = folders.find((f) => f.id === folderId)?.name ?? "フォルダ";
-          pushToast("success", `「${fname}」へ ${refs.length}件を追加しました`);
-          return refreshLibrary();
-        })
-        .catch((err) => pushToast("error", formatErrorMessage(err)));
-    },
-    onDropEntriesToTrash: (refs) => {
-      void vaultApi
-        .moveEntriesToTrash(refs)
-        .then(() => {
-          pushToast("info", `${refs.length}件をゴミ箱へ移動しました`);
-          return refreshLibrary();
-        })
-        .catch((err) => pushToast("error", formatErrorMessage(err)));
-    },
-    onDropImagesToGroup: (itemIds, groupId) => {
-      const entryById = new Map<string, GalleryEntry>();
-      for (const entry of entries) {
-        if (entry.kind === "image") {
-          entryById.set(entry.id, entry);
-        }
-      }
-      const resolvedEntries: GalleryEntry[] = [];
-      const fallbackIds: string[] = [];
-      for (const id of itemIds) {
-        const found = entryById.get(id);
-        if (found) resolvedEntries.push(found);
-        else fallbackIds.push(id);
-      }
-      const orderedIds = [
-        ...sortImagesOldestFirst(resolvedEntries).map((e) => e.id),
-        ...fallbackIds,
-      ];
-      if (orderedIds.length === 0) return;
-
-      void vaultApi
-        .addItemsToGroup(groupId, orderedIds)
-        .then(() => {
-          pushToast("success", `${orderedIds.length}枚を漫画グループへ追加しました`);
-          return refreshLibrary();
-        })
-        .catch((err) => pushToast("error", formatErrorMessage(err)));
-    },
-    onDropEntriesToTag: (refs, tagName) => {
-      void applyBatchTagUpdate(refs, [tagName], []).catch((err) =>
-        pushToast("error", formatErrorMessage(err))
-      );
-    },
-    onDropFolderToParent: (folderId, newParentId) => {
-      void vaultApi
-        .moveFolder(folderId, newParentId)
-        .then(() => refreshLibrary())
-        .catch((err) => pushToast("error", formatErrorMessage(err)));
-    },
-  });
+  const internalDrag = useInternalDrag(mutations.dragDropHandlers);
 
   if (isWebClient && session.lanAuthPhase !== "authenticated") {
     return (
@@ -595,7 +372,7 @@ export function App() {
       folders={folders}
       tags={tags}
       view={view}
-      sidebarFilter={sidebarFilter}
+      sidebarFilter={libraryView.sidebarFilter}
       hoverDropTarget={internalDrag.hoverTarget}
       isWebClient={isWebClient}
       canEdit={canEdit}
@@ -604,29 +381,18 @@ export function App() {
       onCloseDrawer={() => setMobileDrawerOpen(false)}
       onOpenLanShare={() => session.setLanDialogOpen(true)}
       onLogoutLan={() => void session.handleLogoutLan()}
-      onSidebarFilterChange={setSidebarFilter}
-      onSelectView={navigateView}
-      onToggleTag={toggleTagInView}
+      onSidebarFilterChange={libraryView.setSidebarFilter}
+      onSelectView={libraryView.navigateView}
+      onToggleTag={libraryView.toggleTagInView}
       onImportFiles={() => void importFlow.handleImportFiles()}
       onOpenUrlImport={() => {
         setMobileDrawerOpen(false);
         importFlow.setUrlImportDialog({ open: true, initialUrl: "", autoStart: false });
       }}
       onImportFolderAsGroup={() => void importFlow.handleImportFolderAsGroup()}
-      onToggleClipboardWatch={() => {
-        void vaultApi
-          .setClipboardWatch(!status.clipboardWatchEnabled)
-          .then((nextStatus) => {
-            setStatus(nextStatus);
-            pushToast(
-              "info",
-              nextStatus.clipboardWatchEnabled
-                ? "クリップボード監視モードをオンにしました"
-                : "クリップボード監視モードをオフにしました"
-            );
-          })
-          .catch((err) => pushToast("error", formatErrorMessage(err)));
-      }}
+      onToggleClipboardWatch={() =>
+        mutations.toggleClipboardWatch(status.clipboardWatchEnabled)
+      }
       onOpenMaintenance={() =>
         setMaintenanceModal({
           open: true,
@@ -646,47 +412,20 @@ export function App() {
       onPlainExportFolder={handlePlainExportFolder}
       onOpenLockSettings={() => setLockSettingsOpen(true)}
       onLockNow={() => void session.performInstantLock(true)}
-      onCreateFolder={async (parentId, name, color) => {
-        try {
-          await vaultApi.createFolder(parentId, name, color);
-          await refreshLibrary();
-        } catch (err) {
-          pushToast("error", formatErrorMessage(err));
-        }
-      }}
-      onRenameFolder={async (folderId, name, color) => {
-        try {
-          await vaultApi.renameFolder(folderId, name, color);
-          await refreshLibrary();
-        } catch (err) {
-          pushToast("error", formatErrorMessage(err));
-        }
-      }}
-      onMoveFolder={async (folderId, newParentId) => {
-        try {
-          await vaultApi.moveFolder(folderId, newParentId);
-          await refreshLibrary();
-        } catch (err) {
-          pushToast("error", formatErrorMessage(err));
-        }
-      }}
-      onDeleteFolder={async (folderId) => {
-        try {
-          await vaultApi.deleteFolder(folderId);
-          if (view.kind === "folder" && view.folderId === folderId) {
-            navigateView({ kind: "all" });
-          }
-          pushToast("info", "フォルダを削除しました（中の画像は保管庫に残ります）");
-          await refreshLibrary();
-        } catch (err) {
-          pushToast("error", formatErrorMessage(err));
-        }
-      }}
-      onBeginFolderDrag={(folderId, label, x, y) => {
-        internalDrag.beginPendingDrag({ type: "folder", folderId, label }, x, y);
+      onCreateFolder={mutations.folderHandlers.createFolder}
+      onRenameFolder={mutations.folderHandlers.renameFolder}
+      onMoveFolder={mutations.folderHandlers.moveFolder}
+      onDeleteFolder={mutations.folderHandlers.deleteFolder}
+      onBeginFolderDrag={(folderId, label, x, y, pointerId) => {
+        internalDrag.beginPendingDrag({ type: "folder", folderId, label }, x, y, pointerId);
       }}
     />
   );
+
+  const lightboxOpen = gallery.lightboxId !== null;
+  const readerOpen = gallery.readerGroupId !== null && gallery.activeModalGroup !== null;
+  const editorOpen = gallery.editorGroupId !== null && gallery.activeModalGroup !== null;
+  const bulkTagOpen = bulkTagDialogOpen && canEdit && !isTrashView;
 
   return (
     <>
@@ -732,38 +471,28 @@ export function App() {
             view={view}
             folders={folders}
             itemCount={entries.length}
-            canGoBack={historyIndex > 0}
-            canGoForward={historyIndex < history.length - 1}
-            onGoBack={() => setHistoryIndex((i) => Math.max(0, i - 1))}
-            onGoForward={() => setHistoryIndex((i) => Math.min(history.length - 1, i + 1))}
+            canGoBack={libraryView.canGoBack}
+            canGoForward={libraryView.canGoForward}
+            onGoBack={libraryView.goBack}
+            onGoForward={libraryView.goForward}
             thumbSize={thumbSize}
             onThumbSizeChange={setThumbSize}
             fitMode={fitMode}
             onToggleFitMode={() => setFitMode((m) => (m === "ratio" ? "square" : "ratio"))}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            searchText={searchText}
-            onSearchTextChange={setSearchText}
-            mediaType={mediaType}
-            onMediaTypeChange={handleMediaTypeChange}
-            filterOpen={filterOpen}
-            onToggleFilterOpen={() => setFilterOpen((v) => !v)}
-            minRating={minRating}
-            onMinRatingChange={setMinRating}
-            mimeTypes={mimeTypes}
-            onToggleMimeType={(mime) =>
-              setMimeTypes((prev) =>
-                prev.includes(mime) ? prev.filter((m) => m !== mime) : [...prev, mime]
-              )
-            }
-            onRemoveTag={toggleTagInView}
-            onClearAllFilters={() => {
-              setMediaType("all");
-              setMinRating(null);
-              setMimeTypes([]);
-              setSearchText("");
-              navigateView({ kind: "all" });
-            }}
+            sortBy={libraryView.sortBy}
+            onSortByChange={libraryView.setSortBy}
+            searchText={libraryView.searchText}
+            onSearchTextChange={libraryView.setSearchText}
+            mediaType={libraryView.mediaType}
+            onMediaTypeChange={libraryView.handleMediaTypeChange}
+            filterOpen={libraryView.filterOpen}
+            onToggleFilterOpen={() => libraryView.setFilterOpen((v) => !v)}
+            minRating={libraryView.minRating}
+            onMinRatingChange={libraryView.setMinRating}
+            mimeTypes={libraryView.mimeTypes}
+            onToggleMimeType={libraryView.toggleMimeType}
+            onRemoveTag={libraryView.toggleTagInView}
+            onClearAllFilters={libraryView.clearAllFiltersAndView}
             inspectorOpen={inspectorOpen}
             onToggleInspector={() => setInspectorOpen((v) => !v)}
             showMenuButton={isMobileViewport}
@@ -785,15 +514,16 @@ export function App() {
             fitMode={fitMode}
             isDraggingOsFiles={importFlow.isDraggingOsFiles}
             isTrashView={isTrashView}
-            hasActiveFilters={hasActiveFilters}
-            onResetFilters={handleResetFilters}
+            trashCount={status.trashCount}
+            hasActiveFilters={libraryView.hasActiveFilters}
+            onResetFilters={libraryView.handleResetFilters}
             currentFolderId={currentFolderId}
             hoverDropTarget={internalDrag.hoverTarget}
             canEdit={canEdit}
             isWebClient={isWebClient}
             isTouchDevice={isTouchDevice}
             selectionMode={mobileSelectMode}
-            batchRatingBusy={batchRatingBusy}
+            batchRatingBusy={mutations.batchRatingBusy}
             onCardClick={gallery.handleCardClick}
             onSelectAll={gallery.selectAllEntries}
             onClearSelection={gallery.clearSelection}
@@ -802,71 +532,40 @@ export function App() {
             }
             onOpenEntry={gallery.handleOpenEntry}
             onCardContextMenu={gallery.openCardContextMenu}
-            onBeginEntryDrag={(entry, x, y) => {
+            onBeginEntryDrag={(entry, x, y, pointerId) => {
               if (isTrashView) return;
               const k = entryKey({ kind: entry.kind, id: entry.id });
-              const dragRefs = gallery.selectedKeys.has(k)
+              const inSel = gallery.selectedKeys.has(k);
+              const dragRefs = inSel
                 ? gallery.selectedEntryRefs
                 : [{ kind: entry.kind, id: entry.id }];
+              const dragEntriesMeta = inSel ? gallery.selectedEntriesMeta : [entry];
+              const hasImageForGroup = dragEntriesMeta.some(
+                (item) => item.kind === "image" && !isVideoMime(item.coverMimeType)
+              );
               const label =
                 dragRefs.length === 1
                   ? entry.title || (entry.kind === "group" ? "漫画グループ" : "画像")
                   : `${dragRefs.length}件を追加`;
               internalDrag.beginPendingDrag(
-                { type: "entries", entries: dragRefs, label },
+                { type: "entries", entries: dragRefs, hasImageForGroup, label },
                 x,
-                y
+                y,
+                pointerId
               );
             }}
             onImportFiles={() => void importFlow.handleImportFiles()}
-            onAvifCompleted={() => void refreshLibrary()}
+            onAvifCompleted={triggerRefreshLibrary}
             onCreateGroupFromSelection={() => void gallery.handleCreateGroupFromSelection()}
             onBatchSetRating={(rating) =>
-              void applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
+              void mutations.applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
             }
             onOpenBulkTagDialog={() => setBulkTagDialogOpen(true)}
-            onRemoveSelectionFromFolder={() => {
-              if (!currentFolderId || gallery.selectedEntryRefs.length === 0) return;
-              void vaultApi
-                .removeEntriesFromFolder(currentFolderId, gallery.selectedEntryRefs)
-                .then(() => {
-                  pushToast("info", "選択した項目をフォルダから外しました");
-                  return refreshLibrary();
-                })
-                .catch((err) => pushToast("error", formatErrorMessage(err)));
-            }}
+            onRemoveSelectionFromFolder={mutations.gridBulkHandlers.removeSelectionFromFolder}
             onPlainExportSelection={handlePlainExportSelection}
-            onMoveSelectionToTrash={() => {
-              if (gallery.selectedEntryRefs.length === 0) return;
-              void vaultApi
-                .moveEntriesToTrash(gallery.selectedEntryRefs)
-                .then(() => {
-                  pushToast("info", `${gallery.selectedEntryRefs.length}件をゴミ箱へ移動しました`);
-                  return refreshLibrary();
-                })
-                .catch((err) => pushToast("error", formatErrorMessage(err)));
-            }}
-            onRestoreAllTrash={() => {
-              const allRefs = entries.map((e) => ({ kind: e.kind, id: e.id }));
-              void vaultApi
-                .restoreEntriesFromTrash(allRefs)
-                .then(() => {
-                  pushToast("success", "ゴミ箱の項目をすべて復元しました");
-                  return refreshLibrary();
-                })
-                .catch((err) => pushToast("error", formatErrorMessage(err)));
-            }}
-            onEmptyTrash={() => {
-              const idsToInvalidate = entries.map((e) => e.id);
-              void vaultApi
-                .emptyTrash()
-                .then(() => {
-                  imageMemoryCache.invalidateItems(idsToInvalidate);
-                  pushToast("info", "ゴミ箱を空にしました");
-                  return refreshLibrary();
-                })
-                .catch((err) => pushToast("error", formatErrorMessage(err)));
-            }}
+            onMoveSelectionToTrash={mutations.gridBulkHandlers.moveSelectionToTrash}
+            onRestoreAllTrash={mutations.gridBulkHandlers.restoreAllTrash}
+            onEmptyTrash={mutations.gridBulkHandlers.emptyTrash}
           />
         </main>
 
@@ -897,117 +596,29 @@ export function App() {
                 readOnly={!canEdit}
                 isWebClient={isWebClient}
                 onClose={isCompactViewport ? () => setInspectorOpen(false) : undefined}
-                onUpdateTitle={async (id, title) => {
-                  if (gallery.inspectorMode === "group") {
-                    const updated = await vaultApi.setGroupTitle(id, title);
-                    gallery.setGroupDetail(updated);
-                  } else {
-                    const updated = await vaultApi.setItemTitle(id, title);
-                    gallery.setItemDetail(updated);
-                  }
-                  await refreshLibrary();
-                }}
-                onUpdateRating={async (id, rating) => {
-                  if (gallery.inspectorMode === "group") {
-                    const updated = await vaultApi.setGroupRating(id, rating);
-                    gallery.setGroupDetail(updated);
-                  } else {
-                    const updated = await vaultApi.setItemRating(id, rating);
-                    gallery.setItemDetail(updated);
-                  }
-                  await refreshLibrary();
-                }}
-                onUpdateMemo={async (id, memo) => {
-                  if (gallery.inspectorMode === "group") {
-                    const updated = await vaultApi.setGroupMemo(id, memo);
-                    gallery.setGroupDetail(updated);
-                  } else {
-                    const updated = await vaultApi.setItemMemo(id, memo);
-                    gallery.setItemDetail(updated);
-                  }
-                  await refreshLibrary();
-                }}
-                onUpdateSourceUrl={async (id, sourceUrl) => {
-                  const updated = await vaultApi.setItemSourceUrl(id, sourceUrl);
-                  gallery.setItemDetail(updated);
-                  await refreshLibrary();
-                }}
+                onUpdateTitle={mutations.inspectorHandlers.updateTitle}
+                onUpdateRating={mutations.inspectorHandlers.updateRating}
+                onUpdateMemo={mutations.inspectorHandlers.updateMemo}
+                onUpdateSourceUrl={mutations.inspectorHandlers.updateSourceUrl}
                 onCopyToast={(msg) => pushToast("info", msg)}
-                onAddTag={async (id, tag) => {
-                  if (gallery.inspectorMode === "group") {
-                    const updated = await vaultApi.addGroupTag(id, tag);
-                    gallery.setGroupDetail(updated);
-                  } else {
-                    const updated = await vaultApi.addItemTag(id, tag);
-                    gallery.setItemDetail(updated);
-                  }
-                  await refreshLibrary();
-                }}
-                onRemoveTag={async (id, tag) => {
-                  if (gallery.inspectorMode === "group") {
-                    const updated = await vaultApi.removeGroupTag(id, tag);
-                    gallery.setGroupDetail(updated);
-                  } else {
-                    const updated = await vaultApi.removeItemTag(id, tag);
-                    gallery.setItemDetail(updated);
-                  }
-                  await refreshLibrary();
-                }}
+                onAddTag={mutations.inspectorHandlers.addTag}
+                onRemoveTag={mutations.inspectorHandlers.removeTag}
                 onBatchSetRating={(rating) =>
-                  applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
+                  mutations.applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
                 }
-                batchRatingBusy={batchRatingBusy}
-                onBatchUpdateTags={(addTags, removeTags) =>
-                  applyBatchTagUpdate(gallery.selectedEntryRefs, addTags, removeTags).catch(
-                    (err) => pushToast("error", formatErrorMessage(err))
-                  )
-                }
+                batchRatingBusy={mutations.batchRatingBusy}
+                onBatchUpdateTags={mutations.inspectorHandlers.batchUpdateTags}
                 onOpenBulkTagDialog={() => setBulkTagDialogOpen(true)}
-                onAddToFolder={async (folderId) => {
-                  await vaultApi.addEntriesToFolder(folderId, gallery.selectedEntryRefs);
-                  if (gallery.selectedEntryRefs.length === 1) {
-                    const ref = gallery.selectedEntryRefs[0];
-                    if (ref.kind === "image") {
-                      gallery.setItemDetail(await vaultApi.getItemDetail(ref.id));
-                    } else {
-                      gallery.setGroupDetail(await vaultApi.getGroupDetail(ref.id));
-                    }
-                  }
-                  await refreshLibrary();
-                }}
-                onRemoveFromFolder={async (folderId) => {
-                  await vaultApi.removeEntriesFromFolder(folderId, gallery.selectedEntryRefs);
-                  if (gallery.selectedEntryRefs.length === 1) {
-                    const ref = gallery.selectedEntryRefs[0];
-                    if (ref.kind === "image") {
-                      gallery.setItemDetail(await vaultApi.getItemDetail(ref.id));
-                    } else {
-                      gallery.setGroupDetail(await vaultApi.getGroupDetail(ref.id));
-                    }
-                  }
-                  await refreshLibrary();
-                }}
+                onAddToFolder={mutations.inspectorHandlers.addToFolder}
+                onRemoveFromFolder={mutations.inspectorHandlers.removeFromFolder}
                 onOpenLightbox={(id) => gallery.setLightboxId(id)}
                 onOpenReader={(id) => gallery.setReaderGroupId(id)}
                 onOpenEditor={(id) => gallery.setEditorGroupId(id)}
-                onUngroup={async () => {
-                  if (!gallery.groupDetail) return;
-                  await vaultApi.ungroup(gallery.groupDetail.id);
-                  pushToast("info", "グループを解除して単体画像に戻しました");
-                  await refreshLibrary();
-                }}
+                onUngroup={mutations.inspectorHandlers.ungroup}
                 onCreateGroupFromSelection={gallery.handleCreateGroupFromSelection}
                 onPlainExport={handlePlainExportSelection}
-                onMoveToTrash={async () => {
-                  await vaultApi.moveEntriesToTrash(gallery.selectedEntryRefs);
-                  pushToast("info", `${gallery.selectedEntryRefs.length}件をゴミ箱へ移動しました`);
-                  await refreshLibrary();
-                }}
-                onRestoreFromTrash={async () => {
-                  await vaultApi.restoreEntriesFromTrash(gallery.selectedEntryRefs);
-                  pushToast("success", `${gallery.selectedEntryRefs.length}件を復元しました`);
-                  await refreshLibrary();
-                }}
+                onMoveToTrash={mutations.inspectorHandlers.moveToTrash}
+                onRestoreFromTrash={mutations.inspectorHandlers.restoreFromTrash}
                 onPermanentlyDelete={() =>
                   gallery.executePermanentDelete(gallery.selectedEntryRefs)
                 }
@@ -1017,285 +628,185 @@ export function App() {
         )}
       </div>
 
-      <LightboxDialog
-        open={gallery.lightboxId !== null}
-        items={entries}
-        currentId={gallery.lightboxId}
-        detail={gallery.itemDetail}
-        status={status}
-        allTags={tags}
-        allFolders={folders}
-        currentFolderId={currentFolderId}
-        readOnly={!canEdit}
-        isWebClient={isWebClient}
-        onClose={() => gallery.setLightboxId(null)}
-        onNavigate={(id) => {
-          const k = entryKey({ kind: "image", id });
-          gallery.setSelectedKeys(new Set([k]));
-          gallery.setPrimaryKey(k);
-          gallery.setLightboxId(id);
-        }}
-        onUpdateTitle={async (id, title) => {
-          gallery.setItemDetail(await vaultApi.setItemTitle(id, title));
-          await refreshLibrary();
-        }}
-        onUpdateRating={async (id, rating) => {
-          gallery.setItemDetail(await vaultApi.setItemRating(id, rating));
-          await refreshLibrary();
-        }}
-        onUpdateMemo={async (id, memo) => {
-          gallery.setItemDetail(await vaultApi.setItemMemo(id, memo));
-          await refreshLibrary();
-        }}
-        onUpdateSourceUrl={async (id, sourceUrl) => {
-          gallery.setItemDetail(await vaultApi.setItemSourceUrl(id, sourceUrl));
-          await refreshLibrary();
-        }}
-        onCopyToast={(msg) => pushToast("info", msg)}
-        onAddTag={async (id, tag) => {
-          gallery.setItemDetail(await vaultApi.addItemTag(id, tag));
-          await refreshLibrary();
-        }}
-        onRemoveTag={async (id, tag) => {
-          gallery.setItemDetail(await vaultApi.removeItemTag(id, tag));
-          await refreshLibrary();
-        }}
-        onAddToFolder={async (fid, id) => {
-          await vaultApi.addEntriesToFolder(fid, [{ kind: "image", id }]);
-          gallery.setItemDetail(await vaultApi.getItemDetail(id));
-          await refreshLibrary();
-        }}
-        onRemoveFromFolder={async (fid, id) => {
-          await vaultApi.removeEntriesFromFolder(fid, [{ kind: "image", id }]);
-          gallery.setItemDetail(await vaultApi.getItemDetail(id));
-          await refreshLibrary();
-        }}
-        onPlainExport={(item) =>
-          requestPlainExport({
-            kind: "item",
-            itemId: item.id,
-            title: item.title,
-            mimeType: item.coverMimeType,
-          })
-        }
-        onMoveToTrash={async (id) => {
-          await vaultApi.moveEntriesToTrash([{ kind: "image", id }]);
-          gallery.setLightboxId(null);
-          pushToast("info", "ゴミ箱へ移動しました");
-          await refreshLibrary();
-        }}
-        onRestoreFromTrash={async (id) => {
-          await vaultApi.restoreEntriesFromTrash([{ kind: "image", id }]);
-          gallery.setLightboxId(null);
-          pushToast("success", "復元しました");
-          await refreshLibrary();
-        }}
-        onPermanentlyDelete={async (id) => {
-          await gallery.executePermanentDelete([{ kind: "image", id }]);
-        }}
-      />
-
-      <MangaReaderDialog
-        open={gallery.readerGroupId !== null && gallery.activeModalGroup !== null}
-        group={gallery.activeModalGroup}
-        status={status}
-        allTags={tags}
-        allFolders={folders}
-        readOnly={!canEdit}
-        isWebClient={isWebClient}
-        onClose={() => gallery.setReaderGroupId(null)}
-        onOpenEditor={(gid) => gallery.setEditorGroupId(gid)}
-        onUpdateReaderPrefs={async (gid, readingDir, spreadMode, coverAlone) => {
-          const updated = await vaultApi.setGroupReaderPrefs(
-            gid,
-            readingDir,
-            spreadMode,
-            coverAlone
-          );
-          gallery.setActiveModalGroup(updated);
-          if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-        }}
-        onUpdateTitle={async (gid, title) => {
-          const updated = await vaultApi.setGroupTitle(gid, title);
-          gallery.setActiveModalGroup(updated);
-          await refreshLibrary();
-        }}
-        onUpdateRating={async (gid, rating) => {
-          const updated = await vaultApi.setGroupRating(gid, rating);
-          gallery.setActiveModalGroup(updated);
-          await refreshLibrary();
-        }}
-        onUpdateMemo={async (gid, memo) => {
-          const updated = await vaultApi.setGroupMemo(gid, memo);
-          gallery.setActiveModalGroup(updated);
-          await refreshLibrary();
-        }}
-        onAddTag={async (gid, tag) => {
-          const updated = await vaultApi.addGroupTag(gid, tag);
-          gallery.setActiveModalGroup(updated);
-          await refreshLibrary();
-        }}
-        onRemoveTag={async (gid, tag) => {
-          const updated = await vaultApi.removeGroupTag(gid, tag);
-          gallery.setActiveModalGroup(updated);
-          await refreshLibrary();
-        }}
-        onAddToFolder={async (fid, gid) => {
-          await vaultApi.addEntriesToFolder(fid, [{ kind: "group", id: gid }]);
-          gallery.setActiveModalGroup(await vaultApi.getGroupDetail(gid));
-          await refreshLibrary();
-        }}
-        onRemoveFromFolder={async (fid, gid) => {
-          await vaultApi.removeEntriesFromFolder(fid, [{ kind: "group", id: gid }]);
-          gallery.setActiveModalGroup(await vaultApi.getGroupDetail(gid));
-          await refreshLibrary();
-        }}
-        onPlainExport={(grp) =>
-          requestPlainExport({
-            kind: "group",
-            groupId: grp.id,
-            title: grp.title,
-            pageCount: grp.pageCount,
-          })
-        }
-        onUngroup={async (gid) => {
-          await vaultApi.ungroup(gid);
-          gallery.setReaderGroupId(null);
-          pushToast("info", "グループを解除しました");
-          await refreshLibrary();
-        }}
-        onMoveToTrash={async (gid) => {
-          await vaultApi.moveEntriesToTrash([{ kind: "group", id: gid }]);
-          gallery.setReaderGroupId(null);
-          pushToast("info", "ゴミ箱へ移動しました");
-          await refreshLibrary();
-        }}
-      />
-
-      <GroupEditorDialog
-        open={gallery.editorGroupId !== null && gallery.activeModalGroup !== null}
-        group={gallery.activeModalGroup}
-        onClose={() => gallery.setEditorGroupId(null)}
-        onReorder={async (gid, orderedIds) => {
-          try {
-            const updated = await vaultApi.reorderGroupPages(gid, orderedIds);
-            gallery.setActiveModalGroup(updated);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-            await refreshLibrary();
-          } catch (err) {
-            pushToast("error", formatErrorMessage(err));
-            throw err;
-          }
-        }}
-        onRemovePage={async (gid, itemId) => {
-          const next = await vaultApi.removePageFromGroup(gid, itemId);
-          if (!next) {
-            gallery.setEditorGroupId(null);
-            gallery.setReaderGroupId(null);
-            pushToast("info", "最後のページを外したためグループを解除しました");
-          } else {
-            gallery.setActiveModalGroup(next);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(next);
-          }
-          await refreshLibrary();
-        }}
-        onAddFilesToGroup={async (gid, paths) => {
-          const report = await vaultApi.importPaths(paths, null);
-          if (report.importedIds.length > 0) {
-            const updated = await vaultApi.addItemsToGroup(gid, report.importedIds);
-            gallery.setActiveModalGroup(updated);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-            pushToast("success", `${report.importedIds.length}ページを追加しました`);
-          }
-          await refreshLibrary();
-          importFlow.processPendingThumbnails(report.avifPendingIds, report.videoPendingIds);
-        }}
-        onAddBrowserFilesToGroup={async (gid, files) => {
-          const report = await importFlow.uploadBrowserFiles(files, null);
-          if (report.importedIds.length > 0) {
-            const updated = await vaultApi.addItemsToGroup(gid, report.importedIds);
-            gallery.setActiveModalGroup(updated);
-            if (gallery.groupDetail?.id === gid) gallery.setGroupDetail(updated);
-            pushToast("success", `${report.importedIds.length}ページを追加しました`);
-          }
-          await refreshLibrary();
-          importFlow.processPendingThumbnails(report.avifPendingIds, report.videoPendingIds);
-        }}
-      />
-
-      {!isWebClient && (
-        <LockSettingsDialog
-          open={lockSettingsOpen}
-          settings={status.lockSettings}
-          urlImportSettings={status.urlImportSettings}
-          skipPlainExportConfirm={status.skipPlainExportConfirm}
-          onClose={() => setLockSettingsOpen(false)}
-          onSave={async (
-            lockNext: LockSettings,
-            urlNext: UrlImportSettings,
-            skipConfirmNext: boolean
-          ) => {
-            try {
-              const [savedLock, savedUrl, savedSkip] = await Promise.all([
-                vaultApi.setLockSettings(lockNext),
-                vaultApi.setUrlImportSettings(urlNext),
-                vaultApi.setSkipPlainExportConfirm(skipConfirmNext),
-              ]);
-              setStatus((prev) => ({
-                ...prev,
-                lockSettings: savedLock,
-                urlImportSettings: savedUrl,
-                skipPlainExportConfirm: savedSkip,
-              }));
-              pushToast("success", "設定を保存しました");
-            } catch (err) {
-              pushToast("error", formatErrorMessage(err));
+      {lightboxOpen && (
+        <Suspense fallback={null}>
+          <LightboxDialog
+            open
+            items={entries}
+            currentId={gallery.lightboxId}
+            detail={gallery.itemDetail}
+            status={status}
+            allTags={tags}
+            allFolders={folders}
+            currentFolderId={currentFolderId}
+            readOnly={!canEdit}
+            isWebClient={isWebClient}
+            onClose={() => gallery.setLightboxId(null)}
+            onNavigate={(id) => {
+              const k = entryKey({ kind: "image", id });
+              gallery.setSelectedKeys(new Set([k]));
+              gallery.setPrimaryKey(k);
+              gallery.setLightboxId(id);
+            }}
+            onUpdateTitle={mutations.lightboxHandlers.updateTitle}
+            onUpdateRating={mutations.lightboxHandlers.updateRating}
+            onUpdateMemo={mutations.lightboxHandlers.updateMemo}
+            onUpdateSourceUrl={mutations.lightboxHandlers.updateSourceUrl}
+            onCopyToast={(msg) => pushToast("info", msg)}
+            onAddTag={mutations.lightboxHandlers.addTag}
+            onRemoveTag={mutations.lightboxHandlers.removeTag}
+            onAddToFolder={mutations.lightboxHandlers.addToFolder}
+            onRemoveFromFolder={mutations.lightboxHandlers.removeFromFolder}
+            onPlainExport={(item) =>
+              requestPlainExport({
+                kind: "item",
+                itemId: item.id,
+                title: item.title,
+                mimeType: item.coverMimeType,
+              })
             }
-          }}
-        />
+            onMoveToTrash={mutations.lightboxHandlers.moveToTrash}
+            onRestoreFromTrash={mutations.lightboxHandlers.restoreFromTrash}
+            onPermanentlyDelete={async (id) => {
+              await gallery.executePermanentDelete([{ kind: "image", id }]);
+            }}
+          />
+        </Suspense>
       )}
 
-      <UrlImportDialog
-        open={importFlow.urlImportDialog.open}
-        initialUrl={importFlow.urlImportDialog.initialUrl}
-        autoStart={importFlow.urlImportDialog.autoStart}
-        urlImportSettings={status.urlImportSettings}
-        onClose={importFlow.closeUrlImportDialog}
-        onOpenSettings={() => setLockSettingsOpen(true)}
-        onSaveUrlSettings={async (next: UrlImportSettings) => {
-          const saved = await vaultApi.setUrlImportSettings(next);
-          setStatus((prev) => ({ ...prev, urlImportSettings: saved }));
-        }}
-        onImportUrl={importFlow.handleImportUrl}
-      />
-
-      {!isWebClient && (
-        <VaultMaintenanceDialog
-          open={maintenanceModal.open}
-          initialTab={maintenanceModal.initialTab}
-          folders={folders}
-          tags={tags}
-          preselectedFolderIds={maintenanceModal.preselectedFolderIds}
-          preselectedEntries={maintenanceModal.preselectedEntries}
-          onClose={() =>
-            setMaintenanceModal((prev) => ({ ...prev, open: false }))
-          }
-          onDataChanged={async (avifPendingIds, videoPendingIds) => {
-            await refreshLibrary();
-            importFlow.processPendingThumbnails(avifPendingIds ?? [], videoPendingIds ?? []);
-          }}
-          onToast={pushToast}
-        />
+      {readerOpen && (
+        <Suspense fallback={null}>
+          <MangaReaderDialog
+            open
+            group={gallery.activeModalGroup}
+            status={status}
+            allTags={tags}
+            allFolders={folders}
+            readOnly={!canEdit}
+            isWebClient={isWebClient}
+            onClose={() => gallery.setReaderGroupId(null)}
+            onOpenEditor={(gid) => gallery.setEditorGroupId(gid)}
+            onUpdateReaderPrefs={mutations.readerHandlers.updateReaderPrefs}
+            onUpdateTitle={mutations.readerHandlers.updateTitle}
+            onUpdateRating={mutations.readerHandlers.updateRating}
+            onUpdateMemo={mutations.readerHandlers.updateMemo}
+            onAddTag={mutations.readerHandlers.addTag}
+            onRemoveTag={mutations.readerHandlers.removeTag}
+            onAddToFolder={mutations.readerHandlers.addToFolder}
+            onRemoveFromFolder={mutations.readerHandlers.removeFromFolder}
+            onPlainExport={(grp) =>
+              requestPlainExport({
+                kind: "group",
+                groupId: grp.id,
+                title: grp.title,
+                pageCount: grp.pageCount,
+              })
+            }
+            onUngroup={mutations.readerHandlers.ungroup}
+            onMoveToTrash={mutations.readerHandlers.moveToTrash}
+            onRestoreFromTrash={mutations.readerHandlers.restoreFromTrash}
+            onPermanentlyDelete={async (gid) => {
+              await gallery.executePermanentDelete([{ kind: "group", id: gid }]);
+            }}
+          />
+        </Suspense>
       )}
 
-      {!isWebClient && (
-        <LanShareDialog
-          open={session.lanDialogOpen}
-          status={session.lanShareStatus}
-          onStatusChange={session.setLanShareStatus}
-          onClose={() => session.setLanDialogOpen(false)}
-          onToast={pushToast}
-        />
+      {editorOpen && (
+        <Suspense fallback={null}>
+          <GroupEditorDialog
+            open
+            group={gallery.activeModalGroup}
+            onClose={() => gallery.setEditorGroupId(null)}
+            onReorder={mutations.editorHandlers.reorderPages}
+            onRemovePage={mutations.editorHandlers.removePage}
+            onAddFilesToGroup={mutations.editorHandlers.addFilesToGroup}
+            onAddBrowserFilesToGroup={mutations.editorHandlers.addBrowserFilesToGroup}
+          />
+        </Suspense>
+      )}
+
+      {!isWebClient && lockSettingsOpen && (
+        <Suspense fallback={null}>
+          <LockSettingsDialog
+            open
+            settings={status.lockSettings}
+            urlImportSettings={status.urlImportSettings}
+            skipPlainExportConfirm={status.skipPlainExportConfirm}
+            onClose={() => setLockSettingsOpen(false)}
+            onSave={async (
+              lockNext: LockSettings,
+              urlNext: UrlImportSettings,
+              skipConfirmNext: boolean
+            ) => {
+              try {
+                const [savedLock, savedUrl, savedSkip] = await Promise.all([
+                  vaultApi.setLockSettings(lockNext),
+                  vaultApi.setUrlImportSettings(urlNext),
+                  vaultApi.setSkipPlainExportConfirm(skipConfirmNext),
+                ]);
+                setStatus((prev) => ({
+                  ...prev,
+                  lockSettings: savedLock,
+                  urlImportSettings: savedUrl,
+                  skipPlainExportConfirm: savedSkip,
+                }));
+                pushToast("success", "設定を保存しました");
+              } catch (err) {
+                pushToast("error", formatErrorMessage(err));
+              }
+            }}
+          />
+        </Suspense>
+      )}
+
+      {importFlow.urlImportDialog.open && (
+        <Suspense fallback={null}>
+          <UrlImportDialog
+            open
+            initialUrl={importFlow.urlImportDialog.initialUrl}
+            autoStart={importFlow.urlImportDialog.autoStart}
+            urlImportSettings={status.urlImportSettings}
+            onClose={importFlow.closeUrlImportDialog}
+            onOpenSettings={() => setLockSettingsOpen(true)}
+            onSaveUrlSettings={async (next: UrlImportSettings) => {
+              const saved = await vaultApi.setUrlImportSettings(next);
+              setStatus((prev) => ({ ...prev, urlImportSettings: saved }));
+            }}
+            onImportUrl={importFlow.handleImportUrl}
+          />
+        </Suspense>
+      )}
+
+      {!isWebClient && maintenanceModal.open && (
+        <Suspense fallback={null}>
+          <VaultMaintenanceDialog
+            open
+            initialTab={maintenanceModal.initialTab}
+            folders={folders}
+            tags={tags}
+            preselectedFolderIds={maintenanceModal.preselectedFolderIds}
+            preselectedEntries={maintenanceModal.preselectedEntries}
+            onClose={() => setMaintenanceModal((prev) => ({ ...prev, open: false }))}
+            onDataChanged={async (avifPendingIds, videoPendingIds) => {
+              await refreshLibrary();
+              importFlow.processPendingThumbnails(avifPendingIds ?? [], videoPendingIds ?? []);
+            }}
+            onToast={pushToast}
+          />
+        </Suspense>
+      )}
+
+      {!isWebClient && session.lanDialogOpen && (
+        <Suspense fallback={null}>
+          <LanShareDialog
+            open
+            status={session.lanShareStatus}
+            onStatusChange={session.setLanShareStatus}
+            onClose={() => session.setLanDialogOpen(false)}
+            onToast={pushToast}
+          />
+        </Suspense>
       )}
 
       <ContextMenu
@@ -1324,7 +835,8 @@ export function App() {
         <div className="confirm-dialog-inner">
           <h2 id="ctx-perm-delete-title">完全に削除しますか？</h2>
           <p>
-            選択した {gallery.pendingDeleteEntries?.length ?? 0} 件を暗号化保管庫から復元できない形で完全に消去します。この操作は取り消せません。
+            選択した {gallery.pendingDeleteEntries?.length ?? 0}{" "}
+            件を暗号化保管庫から復元できない形で完全に消去します。この操作は取り消せません。
           </p>
           <form method="dialog" className="confirm-dialog-actions">
             <button type="submit" value="cancel" className="btn" autoFocus>
@@ -1345,39 +857,24 @@ export function App() {
         onConfirm={plainExport.confirmPendingExport}
       />
 
-      <BulkTagDialog
-        open={bulkTagDialogOpen && canEdit && !isTrashView}
-        entries={gallery.selectedEntriesMeta}
-        allTags={tags}
-        onClose={() => setBulkTagDialogOpen(false)}
-        onApply={applyBatchTagUpdate}
-      />
-
-      {internalDrag.activePayload && (
-        <div
-          className="drag-ghost"
-          style={{
-            insetInlineStart: internalDrag.cursor.x + 14,
-            insetBlockStart: internalDrag.cursor.y + 12,
-          }}
-        >
-          {internalDrag.hoverTarget?.type === "tag" &&
-          internalDrag.activePayload.type === "entries" ? (
-            <>
-              <Hash size={13} />
-              <span>
-                #{internalDrag.hoverTarget.tagName} を付与 (
-                {internalDrag.activePayload.entries.length}件)
-              </span>
-            </>
-          ) : (
-            <>
-              <Folder size={13} />
-              <span>{internalDrag.activePayload.label}</span>
-            </>
-          )}
-        </div>
+      {bulkTagOpen && (
+        <Suspense fallback={null}>
+          <BulkTagDialog
+            open
+            entries={gallery.selectedEntriesMeta}
+            allTags={tags}
+            onClose={() => setBulkTagDialogOpen(false)}
+            onApply={mutations.applyBatchTagUpdate}
+          />
+        </Suspense>
       )}
+
+      <DragGhost
+        activePayload={internalDrag.activePayload}
+        hoverTarget={internalDrag.hoverTarget}
+        ghostRef={internalDrag.ghostRef}
+        folders={folders}
+      />
 
       <ToastRegion toasts={toasts} onDismiss={dismissToast} />
     </>

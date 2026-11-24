@@ -79,8 +79,13 @@ export function useGallerySelection({
   pushToast,
 }: UseGallerySelectionOptions) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
+  const selectedKeysRef = useRef<Set<string>>(selectedKeys);
+  selectedKeysRef.current = selectedKeys;
   const [primaryKey, setPrimaryKey] = useState<string | null>(null);
+  const primaryKeyRef = useRef<string | null>(primaryKey);
+  primaryKeyRef.current = primaryKey;
   const anchorKeyRef = useRef<string | null>(null);
+  const [detailNonce, setDetailNonce] = useState(0);
 
   const [itemDetail, setItemDetail] = useState<ItemDetail | null>(null);
   const [groupDetail, setGroupDetail] = useState<GroupDetail | null>(null);
@@ -93,22 +98,34 @@ export function useGallerySelection({
   const [pendingDeleteEntries, setPendingDeleteEntries] = useState<EntryRef[] | null>(null);
   const permDeleteDialogRef = useRef<HTMLDialogElement>(null);
 
+  const refreshSelectedDetail = useCallback(() => {
+    setDetailNonce((n) => n + 1);
+  }, []);
+
   const selectSingleKey = useCallback((key: string) => {
-    setSelectedKeys(new Set([key]));
+    const next = new Set([key]);
+    selectedKeysRef.current = next;
+    primaryKeyRef.current = key;
+    setSelectedKeys(next);
     setPrimaryKey(key);
     anchorKeyRef.current = key;
   }, []);
 
   const selectAllEntries = useCallback(() => {
     const all = new Set(entries.map((e) => entryKey({ kind: e.kind, id: e.id })));
+    const firstKey = entries[0] ? entryKey({ kind: entries[0].kind, id: entries[0].id }) : null;
+    selectedKeysRef.current = all;
+    primaryKeyRef.current = firstKey;
     setSelectedKeys(all);
-    if (entries[0]) {
-      setPrimaryKey(entryKey({ kind: entries[0].kind, id: entries[0].id }));
-    }
+    setPrimaryKey(firstKey);
   }, [entries]);
 
   const clearSelection = useCallback(() => {
-    setSelectedKeys(new Set());
+    const empty = new Set<string>();
+    selectedKeysRef.current = empty;
+    primaryKeyRef.current = null;
+    anchorKeyRef.current = null;
+    setSelectedKeys(empty);
     setPrimaryKey(null);
   }, []);
 
@@ -124,7 +141,10 @@ export function useGallerySelection({
   );
 
   const clearSelectionState = useCallback(() => {
-    setSelectedKeys(new Set());
+    const empty = new Set<string>();
+    selectedKeysRef.current = empty;
+    primaryKeyRef.current = null;
+    setSelectedKeys(empty);
     setPrimaryKey(null);
     anchorKeyRef.current = null;
     setItemDetail(null);
@@ -139,20 +159,36 @@ export function useGallerySelection({
 
   const syncSelectionWithEntries = useCallback((nextEntries: GalleryEntry[]) => {
     const validKeys = new Set(nextEntries.map((e) => entryKey({ kind: e.kind, id: e.id })));
-    setSelectedKeys((prev) => {
-      const filtered = new Set<string>();
-      for (const k of prev) {
-        if (validKeys.has(k)) filtered.add(k);
-      }
-      if (filtered.size === 0 && nextEntries.length > 0) {
-        filtered.add(entryKey({ kind: nextEntries[0].kind, id: nextEntries[0].id }));
-      }
-      return filtered;
-    });
-    setPrimaryKey((prev) => {
-      if (prev && validKeys.has(prev)) return prev;
-      return nextEntries[0] ? entryKey({ kind: nextEntries[0].kind, id: nextEntries[0].id }) : null;
-    });
+    const prev = selectedKeysRef.current;
+    const filtered = new Set<string>();
+    for (const k of prev) {
+      if (validKeys.has(k)) filtered.add(k);
+    }
+    if (prev.size > 0 && filtered.size === 0 && nextEntries.length > 0) {
+      filtered.add(entryKey({ kind: nextEntries[0].kind, id: nextEntries[0].id }));
+    }
+
+    const unchanged =
+      filtered.size === prev.size && Array.from(filtered).every((k) => prev.has(k));
+    if (!unchanged) {
+      selectedKeysRef.current = filtered;
+      setSelectedKeys(filtered);
+    }
+
+    const prevPrimary = primaryKeyRef.current;
+    const nextPrimary =
+      filtered.size === 0
+        ? null
+        : prevPrimary && filtered.has(prevPrimary)
+          ? prevPrimary
+          : (Array.from(filtered)[0] ?? null);
+    if (nextPrimary !== prevPrimary) {
+      primaryKeyRef.current = nextPrimary;
+      setPrimaryKey(nextPrimary);
+    }
+    if (anchorKeyRef.current && !filtered.has(anchorKeyRef.current)) {
+      anchorKeyRef.current = nextPrimary;
+    }
   }, []);
 
   // Load Inspector detail for single selection
@@ -188,7 +224,7 @@ export function useGallerySelection({
     return () => {
       active = false;
     };
-  }, [isOpen, selectedKeys, primaryKey]);
+  }, [isOpen, selectedKeys, primaryKey, detailNonce]);
 
   // Keep active modal group synced when reader or editor open
   const modalGroupTargetId = editorGroupId ?? readerGroupId;
@@ -213,7 +249,7 @@ export function useGallerySelection({
     return () => {
       active = false;
     };
-  }, [isOpen, modalGroupTargetId, entries]);
+  }, [isOpen, modalGroupTargetId, entries, detailNonce]);
 
   const selectedEntryRefs = useMemo(
     () => Array.from(selectedKeys).map(parseEntryKey),
@@ -224,14 +260,31 @@ export function useGallerySelection({
     (entry: GalleryEntry, e: MouseEvent) => {
       const key = entryKey({ kind: entry.kind, id: entry.id });
       if (e.metaKey || e.ctrlKey || mobileSelectMode) {
-        setSelectedKeys((prev) => {
-          const next = new Set(prev);
-          if (next.has(key)) next.delete(key);
-          else next.add(key);
-          return next;
-        });
-        setPrimaryKey(key);
-        anchorKeyRef.current = key;
+        const next = new Set(selectedKeysRef.current);
+        const removed = next.delete(key);
+        if (!removed) {
+          next.add(key);
+        }
+        selectedKeysRef.current = next;
+        setSelectedKeys(next);
+
+        if (!removed) {
+          primaryKeyRef.current = key;
+          setPrimaryKey(key);
+          anchorKeyRef.current = key;
+        } else {
+          const remaining = Array.from(next);
+          const curPrimary = primaryKeyRef.current;
+          const nextPrimary =
+            curPrimary && next.has(curPrimary)
+              ? curPrimary
+              : (remaining[remaining.length - 1] ?? null);
+          primaryKeyRef.current = nextPrimary;
+          setPrimaryKey(nextPrimary);
+          if (anchorKeyRef.current === key) {
+            anchorKeyRef.current = nextPrimary;
+          }
+        }
         return;
       }
 
@@ -247,6 +300,8 @@ export function useGallerySelection({
           for (let i = lo; i <= hi; i++) {
             rangeKeys.add(entryKey({ kind: entries[i].kind, id: entries[i].id }));
           }
+          selectedKeysRef.current = rangeKeys;
+          primaryKeyRef.current = key;
           setSelectedKeys(rangeKeys);
           setPrimaryKey(key);
           return;
@@ -305,19 +360,62 @@ export function useGallerySelection({
   const executePermanentDelete = useCallback(
     async (refs: EntryRef[]) => {
       try {
-        const idsToInvalidate = refs.map((r) => r.id);
+        const idsToInvalidate = new Set<string>();
+        const groupFetchPromises: Array<Promise<string[]>> = [];
+        for (const r of refs) {
+          idsToInvalidate.add(r.id);
+          const entryMeta = entries.find((e) => e.kind === r.kind && e.id === r.id);
+          if (entryMeta?.coverItemId) {
+            idsToInvalidate.add(entryMeta.coverItemId);
+          }
+          if (r.kind === "group") {
+            const knownGroup =
+              groupDetail?.id === r.id
+                ? groupDetail
+                : activeModalGroup?.id === r.id
+                  ? activeModalGroup
+                  : null;
+            if (knownGroup) {
+              for (const p of knownGroup.pages) idsToInvalidate.add(p.itemId);
+            } else {
+              groupFetchPromises.push(
+                vaultApi
+                  .getGroupDetail(r.id)
+                  .then((g) => g.pages.map((p) => p.itemId))
+                  .catch(() => [])
+              );
+            }
+          }
+        }
+        if (groupFetchPromises.length > 0) {
+          const pageLists = await Promise.all(groupFetchPromises);
+          for (const pageIds of pageLists) {
+            for (const pid of pageIds) idsToInvalidate.add(pid);
+          }
+        }
+
         await vaultApi.permanentlyDeleteEntries(refs);
-        imageMemoryCache.invalidateItems(idsToInvalidate);
-        if (lightboxId && idsToInvalidate.includes(lightboxId)) setLightboxId(null);
-        if (readerGroupId && idsToInvalidate.includes(readerGroupId)) setReaderGroupId(null);
-        if (editorGroupId && idsToInvalidate.includes(editorGroupId)) setEditorGroupId(null);
+        const invalidList = Array.from(idsToInvalidate);
+        imageMemoryCache.invalidateItems(invalidList);
+        if (lightboxId && idsToInvalidate.has(lightboxId)) setLightboxId(null);
+        if (readerGroupId && idsToInvalidate.has(readerGroupId)) setReaderGroupId(null);
+        if (editorGroupId && idsToInvalidate.has(editorGroupId)) setEditorGroupId(null);
         pushToast("info", `${refs.length}件を完全に削除しました`);
         await refreshLibrary();
       } catch (err) {
         pushToast("error", formatErrorMessage(err));
       }
     },
-    [lightboxId, readerGroupId, editorGroupId, pushToast, refreshLibrary]
+    [
+      entries,
+      groupDetail,
+      activeModalGroup,
+      lightboxId,
+      readerGroupId,
+      editorGroupId,
+      pushToast,
+      refreshLibrary,
+    ]
   );
 
   const inspectorMode: "empty" | "image" | "group" | "multi" =
@@ -627,6 +725,7 @@ export function useGallerySelection({
     openCardContextMenu,
     clearSelectionState,
     syncSelectionWithEntries,
+    refreshSelectedDetail,
     itemDetail,
     setItemDetail,
     groupDetail,

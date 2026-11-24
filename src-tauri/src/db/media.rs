@@ -76,12 +76,19 @@ impl VaultDb {
         let byte_size = bytes.len() as i64;
         let thumb_pending = processed.thumbnail.is_none();
         let safe_duration = duration_ms.max(0);
+        let should_chunk =
+            is_video_mime(processed.mime_type) && (bytes.len() as u64) > CHUNK_STORAGE_THRESHOLD;
+        let effective_chunk_size = if should_chunk {
+            BLOB_CHUNK_SIZE as i64
+        } else {
+            0
+        };
 
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO items
-                (id, title, sha256, mime_type, width, height, byte_size, duration_ms, source_url, rating, memo, palette, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, '', ?10, ?11, ?11, NULL)",
+                (id, title, sha256, mime_type, width, height, byte_size, chunk_size, duration_ms, source_url, rating, memo, palette, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, '', ?11, ?12, ?12, NULL)",
             params![
                 id,
                 title,
@@ -90,6 +97,7 @@ impl VaultDb {
                 processed.width,
                 processed.height,
                 byte_size,
+                effective_chunk_size,
                 safe_duration,
                 clean_source,
                 palette_json,
@@ -97,10 +105,19 @@ impl VaultDb {
             ],
         )?;
 
-        tx.execute(
-            "INSERT INTO blobs (item_id, data) VALUES (?1, ?2)",
-            params![id, bytes],
-        )?;
+        if should_chunk {
+            for (chunk_idx, chunk) in bytes.chunks(BLOB_CHUNK_SIZE).enumerate() {
+                tx.execute(
+                    "INSERT INTO blob_chunks (item_id, chunk_index, data) VALUES (?1, ?2, ?3)",
+                    params![id, chunk_idx as i64, chunk],
+                )?;
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO blobs (item_id, data) VALUES (?1, ?2)",
+                params![id, bytes],
+            )?;
+        }
 
         if let Some(thumb) = processed.thumbnail {
             tx.execute(
@@ -150,12 +167,8 @@ impl VaultDb {
             return self.import_media_bytes(&bytes, default_title, source_url, duration_ms);
         }
 
-        let mut head = [0u8; 64];
-        let head_len = {
-            let mut file = fs::File::open(path)?;
-            read_up_to(&mut file, &mut head)?
-        };
-        let mime_type = detect_mime(&head[..head_len])?;
+        let head = super::read_file_head(path, 4096)?;
+        let mime_type = detect_mime(&head)?;
         if !is_video_mime(mime_type) {
             if file_len <= 512 * 1024 * 1024 {
                 let bytes = fs::read(path)?;
@@ -410,6 +423,10 @@ impl VaultDb {
                 out.extend_from_slice(&data[local_start..local_end_excl]);
             }
         }
+        let expected_len = end.saturating_sub(start).saturating_add(1);
+        if out.len() != expected_len {
+            return Err(VaultError::NotFound(item_id.to_string()));
+        }
         Ok(out)
     }
 
@@ -540,7 +557,10 @@ impl VaultDb {
         }
         let now = now_ms();
         let affected = self.conn.execute(
-            "UPDATE items SET rating = ?2, updated_at = ?3 WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE items SET rating = ?2, updated_at = ?3
+             WHERE id = ?1
+               AND deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
             params![item_id, rating, now],
         )?;
         if affected == 0 {
@@ -553,7 +573,10 @@ impl VaultDb {
         let normalized = unicode_normalization::UnicodeNormalization::nfc(memo).collect::<String>();
         let now = now_ms();
         let affected = self.conn.execute(
-            "UPDATE items SET memo = ?2, updated_at = ?3 WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE items SET memo = ?2, updated_at = ?3
+             WHERE id = ?1
+               AND deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
             params![item_id, normalized, now],
         )?;
         if affected == 0 {
@@ -573,7 +596,10 @@ impl VaultDb {
         let tx = self.conn.transaction()?;
         let exists: Option<String> = tx
             .query_row(
-                "SELECT id FROM items WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id FROM items
+                 WHERE id = ?1
+                   AND deleted_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
                 params![item_id],
                 |r| r.get(0),
             )
@@ -602,7 +628,10 @@ impl VaultDb {
 
         let exists: Option<String> = tx
             .query_row(
-                "SELECT id FROM items WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id FROM items
+                 WHERE id = ?1
+                   AND deleted_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
                 params![item_id],
                 |r| r.get(0),
             )
@@ -637,7 +666,7 @@ impl VaultDb {
         let mut add_keys: HashSet<String> = HashSet::new();
         for raw in add_tags {
             let norm = normalize_nfc_trimmed(raw);
-            if !norm.is_empty() && add_keys.insert(norm.to_lowercase()) {
+            if !norm.is_empty() && add_keys.insert(norm.to_ascii_lowercase()) {
                 normalized_add.push(norm);
             }
         }
@@ -649,7 +678,7 @@ impl VaultDb {
             if norm.is_empty() {
                 continue;
             }
-            let key = norm.to_lowercase();
+            let key = norm.to_ascii_lowercase();
             if !add_keys.contains(&key) && remove_keys.insert(key) {
                 normalized_remove.push(norm);
             }
@@ -881,19 +910,24 @@ impl VaultDb {
     pub fn list_tags(&self) -> Result<Vec<TagWithCount>, VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.name,
-                    (SELECT COUNT(*)
-                     FROM item_tags it
-                     JOIN items i ON i.id = it.item_id
-                     WHERE it.tag_id = t.id
-                       AND i.deleted_at IS NULL
-                       AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = i.id))
-                    +
-                    (SELECT COUNT(*)
-                     FROM group_tags gt
-                     JOIN groups g ON g.id = gt.group_id
-                     WHERE gt.tag_id = t.id
-                       AND g.deleted_at IS NULL) AS total_count
+                    (COALESCE(ic.cnt, 0) + COALESCE(gc.cnt, 0)) AS total_count
              FROM tags t
+             LEFT JOIN (
+                 SELECT it.tag_id, COUNT(*) AS cnt
+                 FROM item_tags it
+                 JOIN items i ON i.id = it.item_id
+                 WHERE i.deleted_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = i.id)
+                 GROUP BY it.tag_id
+             ) ic ON ic.tag_id = t.id
+             LEFT JOIN (
+                 SELECT gt.tag_id, COUNT(*) AS cnt
+                 FROM group_tags gt
+                 JOIN groups g ON g.id = gt.group_id
+                 WHERE g.deleted_at IS NULL
+                 GROUP BY gt.tag_id
+             ) gc ON gc.tag_id = t.id
+             WHERE (COALESCE(ic.cnt, 0) + COALESCE(gc.cnt, 0)) > 0
              ORDER BY total_count DESC, t.name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -905,10 +939,7 @@ impl VaultDb {
         })?;
         let mut tags = Vec::new();
         for row in rows {
-            let t = row?;
-            if t.count > 0 {
-                tags.push(t);
-            }
+            tags.push(row?);
         }
         Ok(tags)
     }

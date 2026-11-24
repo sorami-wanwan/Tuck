@@ -215,7 +215,7 @@ export function BulkTagDialog({
       if (pendingAdd.has(key)) return false;
       const initial = initialTagMap.get(key);
       if (initial?.state === "all" && !pendingRemove.has(key)) return false;
-      if (draftKey && !tag.name.toLowerCase().includes(draftKey)) return false;
+      if (draftKey && !normalizeTagKey(tag.name).includes(draftKey)) return false;
       return true;
     });
   }, [allTags, pendingAdd, initialTagMap, pendingRemove, draftKey]);

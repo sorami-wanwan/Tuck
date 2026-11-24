@@ -1,5 +1,8 @@
 use super::download::{collect_multi_staged_files, extract_video_metadata_list};
-use super::process::{format_ytdlp_failure, parse_progress_line};
+use super::process::{
+    configure_process_group, format_ytdlp_failure, parse_progress_line, run_child_monitored,
+    ChildRunFailure, MonitorOptions,
+};
 use super::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -253,4 +256,40 @@ fn test_parse_progress_and_format_errors() {
     assert!(ffmpeg_msg.contains("brew install ffmpeg"));
     assert!(ffmpeg_msg.contains("winget install"));
     assert!(ffmpeg_msg.contains("apt install ffmpeg"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_child_monitored_total_timeout_under_continuous_stdout() {
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "while true; do printf 'stdout line\\n'; done"]);
+    configure_process_group(&mut cmd);
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let cancel = AtomicBool::new(false);
+    let started = Instant::now();
+    let res = run_child_monitored(
+        child,
+        MonitorOptions {
+            total_timeout: Duration::from_millis(250),
+            stall_timeout: Duration::from_secs(10),
+            capture_stdout: false,
+            stdout_cap: 0,
+            cancel: &cancel,
+            staging_watch: None,
+            item_total_hint: None,
+        },
+        &|_| {},
+    );
+    assert!(matches!(res, Err(ChildRunFailure::TotalTimeout)));
+    assert!(started.elapsed() < Duration::from_secs(3));
 }

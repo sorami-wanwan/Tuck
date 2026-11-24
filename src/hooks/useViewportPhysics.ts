@@ -401,11 +401,34 @@ export function useViewportPhysics({
 
   // Synchronize initial / resized fit synchronously before paint
   useLayoutEffect(() => {
-    if (!enabled) return;
+    const clearTransientTouchAndDrag = () => {
+      touchPointsRef.current.clear();
+      if (touchGestureRef.current.tapTimer !== null) {
+        window.clearTimeout(touchGestureRef.current.tapTimer);
+        touchGestureRef.current.tapTimer = null;
+      }
+      touchGestureRef.current.pinchPrevDist = null;
+      touchGestureRef.current.pinchPrevMid = null;
+      touchGestureRef.current.swipeStart = null;
+      touchGestureRef.current.hadPinch = false;
+      touchGestureRef.current.movedSinceDown = false;
+      touchGestureRef.current.lastTap = null;
+      if (dragRef.current !== null) {
+        dragRef.current = null;
+        setIsDragging(false);
+      }
+    };
+
+    if (!enabled) {
+      clearTransientTouchAndDrag();
+      stopAnimation();
+      return;
+    }
     const s = stateRef.current;
     const resetChanged = lastResetKeyRef.current !== resetKey;
     if (resetChanged) {
       lastResetKeyRef.current = resetKey;
+      clearTransientTouchAndDrag();
       stopAnimation();
       s.mode = "idle";
       s.scale = fitScale;

@@ -1740,3 +1740,341 @@ fn test_query_entries_media_type_filter_and_combinations() {
     assert_eq!(trash_images.len(), 1);
     assert_eq!(trash_images[0].id, jpg_id);
 }
+
+#[test]
+fn test_phase12_db_invariants_cache_epoch_and_vault_create_guard() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("invariants.vault");
+    let mut db = VaultDb::create(&vault_path, "strong-pass", false).unwrap();
+
+    // 1. VaultDb::create(overwrite = true) with invalid passphrase does not clobber existing vault
+    let sentinel = import_id(&mut db, &make_png_bytes(16, 16, 1, 2, 3, 255), Some("keep"));
+    drop(db);
+    let err = VaultDb::create(&vault_path, "", true).err().unwrap();
+    assert!(matches!(err, VaultError::InvalidPassphrase(_)));
+    let mut db = VaultDb::open(&vault_path, "strong-pass").unwrap();
+    assert!(db.get_item_detail(&sentinel).is_ok());
+
+    // 2. Group member exclusion on single-item ops & trash/delete & folder add
+    let p1 = import_id(&mut db, &make_png_bytes(20, 20, 10, 20, 30, 255), Some("p1"));
+    let p2 = import_id(&mut db, &make_png_bytes(21, 20, 40, 50, 60, 255), Some("p2"));
+    let p3 = import_id(&mut db, &make_png_bytes(22, 20, 70, 80, 90, 255), Some("p3"));
+    let folder = db.create_folder(None, "引き継ぎ先", "").unwrap();
+    db.add_entries_to_folder(
+        &folder.id,
+        &[EntryRef {
+            kind: EntryKind::Image,
+            id: p3.clone(),
+        }],
+    )
+    .unwrap();
+
+    let grp = db
+        .create_group_from_items(&[p1.clone(), p2.clone()], Some("漫画A"), None)
+        .unwrap();
+
+    // add_items_to_group migrates p3's folder_items -> folder_groups
+    let updated_grp = db
+        .add_items_to_group(&grp.id, std::slice::from_ref(&p3))
+        .unwrap();
+    assert_eq!(updated_grp.pages.len(), 3);
+    let folder_entries = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Folder {
+                folder_id: folder.id.clone(),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(folder_entries
+        .iter()
+        .any(|e| e.kind == EntryKind::Group && e.id == grp.id));
+    assert!(!folder_entries.iter().any(|e| e.id == p3));
+
+    // reorder_group_pages rejects duplicate page IDs even if len matches via dup/missing check
+    assert!(db
+        .reorder_group_pages(&grp.id, &[p1.clone(), p1.clone(), p2.clone()])
+        .is_err());
+
+    // Direct single-item mutations reject group members
+    assert!(db.set_rating(&p1, 5).is_err());
+    assert!(db.set_memo(&p1, "x").is_err());
+    assert!(db.add_tag(&p1, "NG").is_err());
+    db.add_entries_to_folder(
+        &folder.id,
+        &[EntryRef {
+            kind: EntryKind::Image,
+            id: p1.clone(),
+        }],
+    )
+    .unwrap();
+    let folder_entries_after = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Folder {
+                folder_id: folder.id.clone(),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(!folder_entries_after.iter().any(|e| e.id == p1));
+    assert_eq!(
+        db.move_entries_to_trash(&[EntryRef {
+            kind: EntryKind::Image,
+            id: p1.clone(),
+        }])
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.permanently_delete_entries(&[EntryRef {
+            kind: EntryKind::Image,
+            id: p1.clone(),
+        }])
+        .unwrap(),
+        0
+    );
+
+    // Trashed group guards
+    db.move_entries_to_trash(&[EntryRef {
+        kind: EntryKind::Group,
+        id: grp.id.clone(),
+    }])
+    .unwrap();
+    assert!(db
+        .reorder_group_pages(&grp.id, &[p3.clone(), p2.clone(), p1.clone()])
+        .is_err());
+    assert!(db.remove_page_from_group(&grp.id, &p3).is_err());
+    assert!(db.ungroup(&grp.id).is_err());
+    assert!(db.set_group_reader_prefs(&grp.id, "rtl", "single", true).is_err());
+
+    // batch_update_entry_tags ASCII-case dedup (no false collision on ASCII case)
+    let solo = import_id(&mut db, &make_png_bytes(25, 25, 9, 8, 7, 255), Some("solo"));
+    db.add_tag(&solo, "TagAlpha").unwrap();
+    let tag_report = db
+        .batch_update_entry_tags(
+            &[EntryRef {
+                kind: EntryKind::Image,
+                id: solo.clone(),
+            }],
+            &["tagalpha".to_string(), "TAGALPHA".to_string()],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(tag_report.updated_count, 0);
+
+    // Restore group and test AppState media_cache invalidation + epoch race guard
+    db.restore_entries_from_trash(&[EntryRef {
+        kind: EntryKind::Group,
+        id: grp.id.clone(),
+    }])
+    .unwrap();
+
+    let state = crate::state::AppState::default();
+    state.set_db(Some(db)).unwrap();
+
+    // Populate cache for group page p1 and standalone solo
+    assert!(state.get_or_load_media(&p1).is_ok());
+    assert!(state.get_or_load_media(&solo).is_ok());
+
+    // Simulate in-flight load racing with clear_media_cache via epoch check
+    let state_bg = state.clone();
+    let sentinel_clone = sentinel.clone();
+    let guard = state.lock_db().unwrap();
+    let handle = std::thread::spawn(move || state_bg.get_or_load_media(&sentinel_clone));
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    state.clear_media_cache();
+    drop(guard);
+    assert!(handle.join().unwrap().is_ok());
+
+    // Delete sentinel from DB WITHOUT invalidating cache -> epoch prevented stale insert!
+    {
+        let mut g = state.lock_db().unwrap();
+        let db_mut = g.as_mut().unwrap();
+        db_mut
+            .move_entries_to_trash(&[EntryRef {
+                kind: EntryKind::Image,
+                id: sentinel.clone(),
+            }])
+            .unwrap();
+        let (_, deleted_ids) = db_mut
+            .permanently_delete_entries_detailed(&[EntryRef {
+                kind: EntryKind::Image,
+                id: sentinel.clone(),
+            }])
+            .unwrap();
+        assert_eq!(deleted_ids, vec![sentinel.clone()]);
+    }
+    assert!(matches!(
+        state.get_or_load_media(&sentinel),
+        Err(VaultError::NotFound(_))
+    ));
+
+    // Delete whole group -> invalidate_media_items purges page p1 from media_cache
+    let deleted_group_pages = {
+        let mut g = state.lock_db().unwrap();
+        let db_mut = g.as_mut().unwrap();
+        db_mut
+            .move_entries_to_trash(&[EntryRef {
+                kind: EntryKind::Group,
+                id: grp.id.clone(),
+            }])
+            .unwrap();
+        let (_, ids) = db_mut
+            .permanently_delete_entries_detailed(&[EntryRef {
+                kind: EntryKind::Group,
+                id: grp.id.clone(),
+            }])
+            .unwrap();
+        ids
+    };
+    assert_eq!(deleted_group_pages.len(), 3);
+    state.invalidate_media_items(&deleted_group_pages);
+    assert!(matches!(
+        state.get_or_load_media(&p1),
+        Err(VaultError::NotFound(_))
+    ));
+}
+
+#[test]
+fn performance_indexes_and_optimized_queries_stay_compatible() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("perf.vault");
+    let mut db = VaultDb::create(&vault_path, "pw-perf", false).unwrap();
+
+    // Schema version stays "4" and all 4 idempotent indexes exist
+    let schema_ver: String = db
+        .conn
+        .query_row(
+            "SELECT value FROM vault_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_ver, "4");
+
+    for idx_name in [
+        "idx_items_deleted_mime",
+        "idx_items_deleted_byte_size",
+        "idx_groups_deleted",
+        "idx_group_items_group_order_item",
+    ] {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![idx_name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing index {idx_name} on create");
+    }
+
+    // Empty status & tags
+    let empty_status = db.status().unwrap();
+    assert_eq!(empty_status.item_count, 0);
+    assert_eq!(empty_status.uncategorized_count, 0);
+    assert_eq!(empty_status.untagged_count, 0);
+    assert_eq!(empty_status.trash_count, 0);
+    assert_eq!(empty_status.total_bytes, 0);
+    assert!(db.list_tags().unwrap().is_empty());
+
+    // Populate standalone items, trashed item, and a 2-page group
+    let b1 = make_png_bytes(16, 16, 10, 20, 30, 255);
+    let b2 = make_png_bytes(18, 18, 40, 50, 60, 255);
+    let b3 = make_png_bytes(20, 20, 70, 80, 90, 255);
+    let b4 = make_png_bytes(22, 22, 100, 110, 120, 255);
+
+    let solo_tagged = import_id(&mut db, &b1, Some("solo-tagged"));
+    let solo_trashed = import_id(&mut db, &b2, Some("solo-trashed"));
+    let p1 = import_id(&mut db, &b3, Some("p1"));
+    let p2 = import_id(&mut db, &b4, Some("p2"));
+
+    let folder = db.create_folder(None, "MangaFolder", "#4c8dff").unwrap();
+    db.add_tag(&solo_tagged, "Shared").unwrap();
+    db.add_tag(&solo_tagged, "SoloOnly").unwrap();
+    db.add_tag(&solo_trashed, "TrashedOnly").unwrap();
+
+    let grp = db
+        .create_group_from_items(&[p1.clone(), p2.clone()], Some("Comic1"), None)
+        .unwrap();
+    // Simulate a legacy tag left on a group member page row; list_tags must exclude group pages
+    db.conn
+        .execute("INSERT INTO tags (name) VALUES ('HiddenPageTag')", [])
+        .unwrap();
+    let hidden_tag_id: i64 = db.conn.last_insert_rowid();
+    db.conn
+        .execute(
+            "INSERT INTO item_tags (item_id, tag_id) VALUES (?1, ?2)",
+            params![p1, hidden_tag_id],
+        )
+        .unwrap();
+    db.add_group_tag(&grp.id, "Shared").unwrap();
+    db.add_entries_to_folder(
+        &folder.id,
+        &[EntryRef {
+            kind: EntryKind::Group,
+            id: grp.id.clone(),
+        }],
+    )
+    .unwrap();
+    db.move_entries_to_trash(&[EntryRef {
+        kind: EntryKind::Image,
+        id: solo_trashed.clone(),
+    }])
+    .unwrap();
+
+    // Verify consolidated status() counts & total_bytes (includes p1+p2 + solo_tagged, excludes solo_trashed)
+    let st = db.status().unwrap();
+    assert_eq!(st.item_count, 2); // solo_tagged + grp
+    assert_eq!(st.uncategorized_count, 1); // solo_tagged only (grp is in folder)
+    assert_eq!(st.untagged_count, 0); // both solo_tagged and grp have tags
+    assert_eq!(st.trash_count, 1); // solo_trashed
+    assert_eq!(st.total_bytes, (b1.len() + b3.len() + b4.len()) as i64);
+
+    // Verify list_tags() excludes TrashedOnly & HiddenPageTag and sorts by count DESC, name ASC
+    let tags = db.list_tags().unwrap();
+    assert_eq!(
+        tags.iter()
+            .map(|t| (t.name.as_str(), t.count))
+            .collect::<Vec<_>>(),
+        vec![("Shared", 2), ("SoloOnly", 1)]
+    );
+
+    // Verify scoped query_entries on MediaFilter::All & MediaFilter::Manga & Trash
+    let all_entries = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::All,
+            media_type: MediaFilter::All,
+            sort_by: SortBy::TitleAsc,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(all_entries.len(), 2);
+    let grp_entry = all_entries.iter().find(|e| e.kind == EntryKind::Group).unwrap();
+    assert_eq!(grp_entry.page_count, 2);
+    assert_eq!(grp_entry.byte_size, (b3.len() + b4.len()) as i64);
+    assert_eq!(grp_entry.tags, vec!["Shared"]);
+    assert_eq!(grp_entry.folder_ids, vec![folder.id.clone()]);
+    let solo_entry = all_entries.iter().find(|e| e.kind == EntryKind::Image).unwrap();
+    assert_eq!(solo_entry.tags, vec!["Shared", "SoloOnly"]);
+
+    let manga_only = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Folder {
+                folder_id: folder.id,
+            },
+            media_type: MediaFilter::Manga,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(manga_only.len(), 1);
+    assert_eq!(manga_only[0].id, grp.id);
+
+    // Reopen cleanly & verify readonly V4 handle works without erroring on indexes
+    drop(db);
+    let ro = VaultDb::open_readonly(&vault_path, "pw-perf").unwrap();
+    assert_eq!(ro.db.status().unwrap().item_count, 2);
+    drop(ro);
+    let reopened = VaultDb::open(&vault_path, "pw-perf").unwrap();
+    assert_eq!(reopened.status().unwrap().item_count, 2);
+}

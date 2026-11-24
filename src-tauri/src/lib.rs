@@ -134,15 +134,20 @@ fn can_init_global_shortcut() -> bool {
     }
 }
 
-pub fn sync_global_lock_shortcut(app: &AppHandle, shortcut_str: &str) {
+pub fn sync_global_lock_shortcut(app: &AppHandle, shortcut_str: &str) -> Result<(), VaultError> {
+    let shortcut = shortcut_str.parse::<Shortcut>().map_err(|_| {
+        VaultError::InvalidInput("ショートカットの形式が不正です".to_string())
+    })?;
     if !GLOBAL_SHORTCUT_READY.load(Ordering::SeqCst) {
-        return;
+        return Ok(());
     }
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    if let Ok(shortcut) = shortcut_str.parse::<Shortcut>() {
-        let _ = gs.register(shortcut);
-    }
+    gs.register(shortcut).map_err(|e| {
+        VaultError::InvalidInput(format!(
+            "グローバルショートカット ({shortcut_str}) を登録できませんでした: {e}"
+        ))
+    })
 }
 
 pub fn clear_global_lock_shortcuts(app: &AppHandle) {
@@ -259,6 +264,11 @@ pub fn run() {
                 if let Ok(resp) = builder.body(Vec::new()) {
                     responder.respond(resp);
                 }
+                return;
+            }
+
+            if method != Method::GET && method != Method::HEAD {
+                respond_status(responder, StatusCode::METHOD_NOT_ALLOWED, None, allowed_origin);
                 return;
             }
 

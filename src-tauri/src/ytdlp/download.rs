@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -16,8 +15,8 @@ use super::binary::{
     resolve_ytdlp_binary,
 };
 use super::process::{
-    format_size_limit_label, format_ytdlp_failure, run_child_monitored, ChildRunFailure,
-    MonitorOptions,
+    configure_process_group, format_size_limit_label, format_ytdlp_failure, run_child_monitored,
+    ChildRunFailure, MonitorOptions,
 };
 use super::{
     normalize_twitter_url, validate_http_url, DownloadedItemPayload, DownloadedMediaItem,
@@ -297,11 +296,15 @@ fn find_staged_media_file(dir: &Path) -> Option<PathBuf> {
 }
 
 fn read_file_head(path: &Path) -> Result<Vec<u8>, VaultError> {
-    let mut f = fs::File::open(path)?;
-    let mut buf = vec![0u8; 64];
-    let n = f.read(&mut buf)?;
-    buf.truncate(n);
-    Ok(buf)
+    crate::db::read_file_head(path, 4096).map_err(VaultError::from)
+}
+
+fn combine_stderr_stdout(mut stderr: Vec<u8>, stdout: &[u8]) -> Vec<u8> {
+    if !stderr.is_empty() && !stdout.is_empty() && !stderr.ends_with(b"\n") {
+        stderr.push(b'\n');
+    }
+    stderr.extend_from_slice(stdout);
+    stderr
 }
 
 struct YtDlpExecContext<'a> {
@@ -322,6 +325,7 @@ where
 {
     let mut cmd = Command::new(ctx.bin);
     configure_tool_command(&mut cmd, ctx.aug_path);
+    configure_process_group(&mut cmd);
     cmd.args([
         "--no-playlist",
         "--playlist-items",
@@ -401,6 +405,7 @@ where
     let item_spec = playlist_item.max(1).to_string();
     let mut cmd = Command::new(ctx.bin);
     configure_tool_command(&mut cmd, ctx.aug_path);
+    configure_process_group(&mut cmd);
     cmd.args([
         "--no-playlist",
         "--playlist-items",
@@ -502,6 +507,7 @@ where
 
     let mut cmd = Command::new(ctx.bin);
     configure_tool_command(&mut cmd, ctx.aug_path);
+    configure_process_group(&mut cmd);
     cmd.args([
         "--no-playlist",
         "--playlist-items",
@@ -590,8 +596,7 @@ where
     };
 
     if !out.status.success() {
-        let mut combined = out.stderr;
-        combined.extend_from_slice(&out.stdout);
+        let combined = combine_stderr_stdout(out.stderr, &out.stdout);
         return Err(VaultError::UrlImport(format_ytdlp_failure(
             "download",
             &combined,
@@ -601,8 +606,7 @@ where
     }
 
     let Some(file_path) = find_staged_media_file(staging.path()) else {
-        let mut combined = out.stderr;
-        combined.extend_from_slice(&out.stdout);
+        let combined = combine_stderr_stdout(out.stderr, &out.stdout);
         return Err(VaultError::UrlImport(format_ytdlp_failure(
             "download",
             &combined,
@@ -644,6 +648,7 @@ where
 
     let mut cmd = Command::new(ctx.bin);
     configure_tool_command(&mut cmd, ctx.aug_path);
+    configure_process_group(&mut cmd);
     cmd.args([
         "--no-playlist",
         "--playlist-items",
@@ -742,8 +747,7 @@ where
         if !warnings.is_empty() {
             return Err(VaultError::UrlImport(warnings.join("\n")));
         }
-        let mut combined = out.stderr;
-        combined.extend_from_slice(&out.stdout);
+        let combined = combine_stderr_stdout(out.stderr, &out.stdout);
         return Err(VaultError::UrlImport(format_ytdlp_failure(
             "download",
             &combined,

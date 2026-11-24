@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -157,7 +158,7 @@ pub(super) fn require_session(
     headers: &HeaderMap,
 ) -> Result<(String, LanAccessMode), VaultError> {
     let sid = extract_cookie(headers, SESSION_COOKIE_NAME).ok_or(VaultError::LanUnauthorized)?;
-    let mut guard = runtime.store_write();
+    let guard = runtime.store_read();
     if !guard.running {
         return Err(VaultError::LanUnauthorized);
     }
@@ -167,11 +168,8 @@ pub(super) fn require_session(
         }
     }
     let mode = guard.mode;
-    let session = guard
-        .sessions
-        .get_mut(sid)
-        .ok_or(VaultError::LanUnauthorized)?;
-    session.last_seen_at_ms = now_ms();
+    let session = guard.sessions.get(sid).ok_or(VaultError::LanUnauthorized)?;
+    session.last_seen_at_ms.store(now_ms(), Ordering::Relaxed);
     Ok((sid.to_string(), mode))
 }
 
@@ -187,7 +185,7 @@ pub(super) fn require_media_auth(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or(VaultError::LanUnauthorized)?;
-    let mut guard = runtime.store_write();
+    let guard = runtime.store_read();
     if !guard.running {
         return Err(VaultError::LanUnauthorized);
     }
@@ -196,15 +194,12 @@ pub(super) fn require_media_auth(
             return Err(VaultError::LanUnauthorized);
         }
     }
-    let matched_sid = guard
+    if let Some((_, session)) = guard
         .sessions
         .iter()
         .find(|(_, s)| ct_eq(s.media_token.as_bytes(), token.as_bytes()))
-        .map(|(k, _)| k.clone());
-    if let Some(sid) = matched_sid {
-        if let Some(s) = guard.sessions.get_mut(&sid) {
-            s.last_seen_at_ms = now_ms();
-        }
+    {
+        session.last_seen_at_ms.store(now_ms(), Ordering::Relaxed);
         return Ok(());
     }
     Err(VaultError::LanUnauthorized)
@@ -242,13 +237,10 @@ impl From<VaultError> for LanApiError {
     }
 }
 
-pub(super) fn require_write_checked(
+pub(super) fn require_write_session_no_csrf(
     runtime: &LanServerRuntime,
     headers: &HeaderMap,
 ) -> Result<(), LanApiError> {
-    if let Err(e) = verify_csrf(headers) {
-        return Err(csrf_forbidden_response(e).into());
-    }
     let (_, mode) = require_session(runtime, headers)?;
     if !runtime.app_state.is_open() {
         return Err(VaultError::VaultNotOpen.into());
@@ -257,6 +249,16 @@ pub(super) fn require_write_checked(
         return Err(VaultError::LanReadOnly.into());
     }
     Ok(())
+}
+
+pub(super) fn require_write_checked(
+    runtime: &LanServerRuntime,
+    headers: &HeaderMap,
+) -> Result<(), LanApiError> {
+    if let Err(e) = verify_csrf(headers) {
+        return Err(csrf_forbidden_response(e).into());
+    }
+    require_write_session_no_csrf(runtime, headers)
 }
 
 pub(super) fn require_read_checked(
@@ -297,6 +299,8 @@ pub(super) fn notify_changed(runtime: &LanServerRuntime) {
     runtime.notifier.emit_library_changed();
 }
 
+const MAX_LAN_SESSIONS: usize = 64;
+
 fn create_client_session(
     runtime: &LanServerRuntime,
     ip: IpAddr,
@@ -304,20 +308,37 @@ fn create_client_session(
 ) -> Result<(String, LanAuthStatus), VaultError> {
     let sid = generate_random_hex(32)?;
     let media_token = generate_random_hex(16)?;
+    let session_id = generate_random_hex(8)?;
     let now = now_ms();
     let device_label = parse_device_label(headers);
 
     let (mode, expires_at_ms) = {
         let mut guard = runtime.store_write();
+        let expired = guard.expires_at_ms.is_some_and(|exp| now >= exp);
+        if !guard.running || expired || !runtime.app_state.is_open() {
+            return Err(VaultError::VaultNotOpen);
+        }
+        while guard.sessions.len() >= MAX_LAN_SESSIONS {
+            if let Some(oldest_sid) = guard
+                .sessions
+                .iter()
+                .min_by_key(|(_, s)| s.last_seen_at_ms.load(Ordering::Relaxed))
+                .map(|(k, _)| k.clone())
+            {
+                guard.sessions.remove(&oldest_sid);
+            } else {
+                break;
+            }
+        }
         guard.sessions.insert(
             sid.clone(),
             ClientSession {
-                id: generate_random_hex(8)?,
+                id: session_id,
                 media_token: media_token.clone(),
                 ip: ip.to_canonical().to_string(),
                 device_label,
                 connected_at_ms: now,
-                last_seen_at_ms: now,
+                last_seen_at_ms: Arc::new(AtomicI64::new(now)),
             },
         );
         (guard.mode, guard.expires_at_ms)
@@ -348,7 +369,7 @@ pub(super) async fn handle_auth_status(
     headers: HeaderMap,
 ) -> Response {
     let sid = extract_cookie(&headers, SESSION_COOKIE_NAME);
-    let mut guard = runtime.store_write();
+    let guard = runtime.store_read();
     let vault_open = runtime.app_state.is_open();
     let expired = guard.expires_at_ms.is_some_and(|exp| now_ms() >= exp);
     if !guard.running || expired {
@@ -363,8 +384,8 @@ pub(super) async fn handle_auth_status(
     }
 
     if let Some(sid_val) = sid {
-        if let Some(session) = guard.sessions.get_mut(sid_val) {
-            session.last_seen_at_ms = now_ms();
+        if let Some(session) = guard.sessions.get(sid_val) {
+            session.last_seen_at_ms.store(now_ms(), Ordering::Relaxed);
             let mt = session.media_token.clone();
             return Json(LanAuthStatus {
                 authenticated: true,
@@ -412,7 +433,8 @@ pub(super) async fn handle_auth_pin(
     let now_inst = Instant::now();
     {
         let mut guard = runtime.store_write();
-        if !guard.running || !runtime.app_state.is_open() {
+        let expired = guard.expires_at_ms.is_some_and(|exp| now_ms() >= exp);
+        if !guard.running || expired || !runtime.app_state.is_open() {
             return error_response(VaultError::VaultNotOpen);
         }
 
@@ -487,7 +509,8 @@ pub(super) async fn handle_auth_token(
 
     {
         let guard = runtime.store_read();
-        if !guard.running || !runtime.app_state.is_open() {
+        let expired = guard.expires_at_ms.is_some_and(|exp| now_ms() >= exp);
+        if !guard.running || expired || !runtime.app_state.is_open() {
             return error_response(VaultError::VaultNotOpen);
         }
         if submitted.is_empty() || !ct_eq(guard.qr_token.as_bytes(), submitted.as_bytes()) {

@@ -27,7 +27,15 @@ interface GroupEditorDialogProps {
   onAddBrowserFilesToGroup?: (groupId: string, files: File[]) => Promise<void>;
 }
 
-function PageThumb({ itemId }: { itemId: string }) {
+function PageThumb({
+  itemId,
+  hasThumbnail,
+  mimeType,
+}: {
+  itemId: string;
+  hasThumbnail: boolean;
+  mimeType: string;
+}) {
   const [url, setUrl] = useState<string | undefined>(() =>
     imageMemoryCache.getCachedThumbnailUrl(itemId)
   );
@@ -39,16 +47,22 @@ function PageThumb({ itemId }: { itemId: string }) {
       setUrl(cached);
       return;
     }
-    void imageMemoryCache
-      .getThumbnailUrl(itemId)
-      .then((u) => {
-        if (active) setUrl(u);
-      })
-      .catch(() => {});
+    const load = async () => {
+      try {
+        if (!hasThumbnail && mimeType === "image/avif") {
+          await imageMemoryCache.processPendingAvifThumbnail(itemId);
+        }
+        const nextUrl = await imageMemoryCache.getThumbnailUrl(itemId);
+        if (active) setUrl(nextUrl);
+      } catch {
+        // ignore
+      }
+    };
+    void load();
     return () => {
       active = false;
     };
-  }, [itemId]);
+  }, [itemId, hasThumbnail, mimeType]);
 
   return (
     <div className="page-editor-thumb">
@@ -91,6 +105,7 @@ export function GroupEditorDialog({
 
   const prevGroupIdRef = useRef<string | null>(group?.id ?? null);
   const inFlightCountRef = useRef(0);
+  const opGenRef = useRef(0);
   const reorderChainRef = useRef<Promise<void>>(Promise.resolve());
   const announceTimerRef = useRef<number | null>(null);
 
@@ -108,6 +123,7 @@ export function GroupEditorDialog({
     if (!open || !group) {
       prevGroupIdRef.current = null;
       inFlightCountRef.current = 0;
+      opGenRef.current += 1;
       prevRectsRef.current.clear();
       setDisplayPages([]);
       setSortMenuPos(null);
@@ -120,6 +136,7 @@ export function GroupEditorDialog({
 
     if (groupChanged) {
       inFlightCountRef.current = 0;
+      opGenRef.current += 1;
       prevRectsRef.current.clear();
       setSortMenuPos(null);
       setDisplayPages(group.pages);
@@ -217,6 +234,7 @@ export function GroupEditorDialog({
       announce(announcement);
 
       const orderedIds = nextPages.map((p) => p.itemId);
+      const opGen = ++opGenRef.current;
       inFlightCountRef.current += 1;
 
       reorderChainRef.current = reorderChainRef.current
@@ -224,9 +242,11 @@ export function GroupEditorDialog({
           try {
             await onReorder(targetGroupId, orderedIds);
           } catch {
-            const current = latestGroupRef.current;
-            if (current && current.id === targetGroupId) {
-              setDisplayPages(current.pages);
+            if (opGenRef.current === opGen) {
+              const current = latestGroupRef.current;
+              if (current && current.id === targetGroupId) {
+                setDisplayPages(current.pages);
+              }
             }
           } finally {
             inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
@@ -235,6 +255,40 @@ export function GroupEditorDialog({
         .catch(() => {});
     },
     [announce, onReorder, snapshotCardRects]
+  );
+
+  const handleRemovePage = useCallback(
+    (itemId: string) => {
+      const targetGroup = latestGroupRef.current;
+      if (!targetGroup) return;
+      const targetGroupId = targetGroup.id;
+      const currentPages = displayPagesRef.current;
+      if (currentPages.length > 1) {
+        snapshotCardRects();
+        setDisplayPages(currentPages.filter((p) => p.itemId !== itemId));
+      }
+
+      const opGen = ++opGenRef.current;
+      inFlightCountRef.current += 1;
+
+      reorderChainRef.current = reorderChainRef.current
+        .then(async () => {
+          try {
+            await onRemovePage(targetGroupId, itemId);
+          } catch {
+            if (opGenRef.current === opGen) {
+              const current = latestGroupRef.current;
+              if (current && current.id === targetGroupId) {
+                setDisplayPages(current.pages);
+              }
+            }
+          } finally {
+            inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+          }
+        })
+        .catch(() => {});
+    },
+    [onRemovePage, snapshotCardRects]
   );
 
   const pageIds = useMemo(() => displayPages.map((p) => p.itemId), [displayPages]);
@@ -445,7 +499,11 @@ export function GroupEditorDialog({
               className={`page-editor-card ${isSource ? "is-dragging-source" : ""}`}
               onPointerDown={(e) => drag.handleCardPointerDown(index, e)}
             >
-              <PageThumb itemId={page.itemId} />
+              <PageThumb
+                itemId={page.itemId}
+                hasThumbnail={page.hasThumbnail}
+                mimeType={page.mimeType}
+              />
               <div
                 style={{
                   display: "flex",
@@ -512,9 +570,7 @@ export function GroupEditorDialog({
                   style={{ inlineSize: 24, blockSize: 24, color: "var(--text-secondary)" }}
                   title="グループから外して単体画像に戻す"
                   aria-label={`P.${index + 1} をグループから外す`}
-                  onClick={() => {
-                    if (group) void onRemovePage(group.id, page.itemId);
-                  }}
+                  onClick={() => handleRemovePage(page.itemId)}
                 >
                   <Unlink size={13} />
                 </button>

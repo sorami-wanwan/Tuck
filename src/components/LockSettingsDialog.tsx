@@ -108,6 +108,7 @@ export function LockSettingsDialog({
   onSave,
 }: LockSettingsDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const wasOpenRef = useRef(false);
   const [shortcut, setShortcut] = useState(settings.shortcut);
   const [idleMinutes, setIdleMinutes] = useState(settings.idleTimeoutMinutes);
   const [urlAutoEnabled, setUrlAutoEnabled] = useState(urlImportSettings.enabled);
@@ -138,20 +139,24 @@ export function LockSettingsDialog({
   useEffect(() => {
     const dlg = dialogRef.current;
     if (!dlg) return;
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
     if (open) {
-      setShortcut(settings.shortcut);
-      setIdleMinutes(settings.idleTimeoutMinutes);
-      setUrlAutoEnabled(urlImportSettings.enabled);
-      setYtdlpPath(urlImportSettings.ytdlpPath);
-      setFfmpegPath(urlImportSettings.ffmpegPath);
-      setCookieBrowser(urlImportSettings.cookieBrowser);
-      setCookiesFile(urlImportSettings.cookiesFile);
-      setMaxVideoSizeMb(urlImportSettings.maxVideoSizeMb);
-      setMaxVideoHeight(urlImportSettings.maxVideoHeight);
-      setSkipExportConfirm(skipPlainExportConfirm);
-      setFormError(null);
+      if (justOpened) {
+        setShortcut(settings.shortcut);
+        setIdleMinutes(settings.idleTimeoutMinutes);
+        setUrlAutoEnabled(urlImportSettings.enabled);
+        setYtdlpPath(urlImportSettings.ytdlpPath);
+        setFfmpegPath(urlImportSettings.ffmpegPath);
+        setCookieBrowser(urlImportSettings.cookieBrowser);
+        setCookiesFile(urlImportSettings.cookiesFile);
+        setMaxVideoSizeMb(urlImportSettings.maxVideoSizeMb);
+        setMaxVideoHeight(urlImportSettings.maxVideoHeight);
+        setSkipExportConfirm(skipPlainExportConfirm);
+        setFormError(null);
+        void checkTool(urlImportSettings.ytdlpPath, urlImportSettings.ffmpegPath);
+      }
       if (!dlg.open) dlg.showModal();
-      void checkTool(urlImportSettings.ytdlpPath, urlImportSettings.ffmpegPath);
     } else if (dlg.open) {
       dlg.close();
     }

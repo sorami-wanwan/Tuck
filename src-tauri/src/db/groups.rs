@@ -131,6 +131,7 @@ impl VaultDb {
         group_id: &str,
         item_ids: &[String],
     ) -> Result<GroupDetail, VaultError> {
+        let now = now_ms();
         let tx = self.conn.transaction()?;
         let group_active: Option<Option<i64>> = tx
             .query_row(
@@ -195,6 +196,11 @@ impl VaultDb {
                  SELECT ?1, tag_id FROM item_tags WHERE item_id = ?2",
                 params![group_id, item_id],
             )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO folder_groups (folder_id, group_id, added_at)
+                 SELECT folder_id, ?1, ?3 FROM folder_items WHERE item_id = ?2",
+                params![group_id, item_id, now],
+            )?;
             tx.execute("DELETE FROM item_tags WHERE item_id = ?1", params![item_id])?;
             tx.execute(
                 "DELETE FROM folder_items WHERE item_id = ?1",
@@ -204,7 +210,7 @@ impl VaultDb {
 
         tx.execute(
             "UPDATE groups SET updated_at = ?2 WHERE id = ?1",
-            params![group_id, now_ms()],
+            params![group_id, now],
         )?;
         tx.commit()?;
         self.get_group_detail(group_id)
@@ -216,6 +222,17 @@ impl VaultDb {
         ordered_item_ids: &[String],
     ) -> Result<GroupDetail, VaultError> {
         let tx = self.conn.transaction()?;
+        let active: Option<String> = tx
+            .query_row(
+                "SELECT id FROM groups WHERE id = ?1 AND deleted_at IS NULL",
+                params![group_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if active.is_none() {
+            return Err(VaultError::NotFound(group_id.to_string()));
+        }
+
         let current_ids: HashSet<String> = {
             let mut stmt = tx.prepare("SELECT item_id FROM group_items WHERE group_id = ?1")?;
             let rows = stmt.query_map(params![group_id], |r| r.get::<_, String>(0))?;
@@ -228,6 +245,12 @@ impl VaultDb {
 
         if current_ids.is_empty() {
             return Err(VaultError::NotFound(group_id.to_string()));
+        }
+
+        if ordered_item_ids.len() != current_ids.len() {
+            return Err(VaultError::InvalidInput(
+                "ページ並び替えの要素が一致しません".to_string(),
+            ));
         }
 
         let incoming: HashSet<String> = ordered_item_ids.iter().cloned().collect();
@@ -258,6 +281,17 @@ impl VaultDb {
     ) -> Result<Option<GroupDetail>, VaultError> {
         let now = now_ms();
         let tx = self.conn.transaction()?;
+        let active: Option<String> = tx
+            .query_row(
+                "SELECT id FROM groups WHERE id = ?1 AND deleted_at IS NULL",
+                params![group_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if active.is_none() {
+            return Err(VaultError::NotFound(group_id.to_string()));
+        }
+
         let affected = tx.execute(
             "DELETE FROM group_items WHERE group_id = ?1 AND item_id = ?2",
             params![group_id, item_id],
@@ -316,7 +350,7 @@ impl VaultDb {
         let tx = self.conn.transaction()?;
         let exists: Option<String> = tx
             .query_row(
-                "SELECT id FROM groups WHERE id = ?1",
+                "SELECT id FROM groups WHERE id = ?1 AND deleted_at IS NULL",
                 params![group_id],
                 |r| r.get(0),
             )
@@ -539,7 +573,7 @@ impl VaultDb {
         let affected = self.conn.execute(
             "UPDATE groups
              SET reading_dir = ?2, spread_mode = ?3, cover_alone = ?4, updated_at = ?5
-             WHERE id = ?1",
+             WHERE id = ?1 AND deleted_at IS NULL",
             params![
                 group_id,
                 reading_dir,
