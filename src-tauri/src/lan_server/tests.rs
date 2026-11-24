@@ -1113,3 +1113,264 @@ async fn test_lan_server_batch_entry_tags_rbac_and_sync() {
 
     handle.stop("test_done");
 }
+
+#[tokio::test]
+async fn test_lan_server_batch_entry_rating_rbac_and_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("lan_batch_rating.vault");
+    let mut db = VaultDb::create(&vault_path, "vault-pass-rating", true).unwrap();
+
+    let png1 = minimal_png_bytes();
+    let mut png2 = minimal_png_bytes();
+    png2.push(0);
+    let mut png3 = minimal_png_bytes();
+    png3.extend_from_slice(&[1, 2]);
+
+    let img_id = match db.import_bytes(&png1, Some("standalone")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected image"),
+    };
+    let p1 = match db.import_bytes(&png2, Some("p1")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p1"),
+    };
+    let p2 = match db.import_bytes(&png3, Some("p2")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p2"),
+    };
+    let grp = db
+        .create_group_from_items(&[p1, p2], Some("comic"), None)
+        .unwrap();
+
+    let state = AppState::default();
+    {
+        let mut g = state.lock_db().unwrap();
+        *g = Some(db);
+    }
+
+    let dist_dir = dir.path().join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+    fs::write(
+        dist_dir.join("index.html"),
+        "<html><body>Tuck</body></html>",
+    )
+    .unwrap();
+
+    let (handle, status) = start_lan_server_on_addr(
+        state.clone(),
+        StartLanShareRequest {
+            mode: LanAccessMode::ReadOnly,
+            duration_minutes: 30,
+            bind_ip: None,
+            pause_idle_lock: true,
+        },
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "127.0.0.1".to_string(),
+        vec![],
+        AssetSource::Dir(dist_dir),
+        LanHostNotifier::default(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut g = state.lan_server.lock().unwrap();
+        *g = Some(handle.clone());
+    }
+
+    let port = status.port;
+    let payload = serde_json::json!({
+        "entries": [
+            { "kind": "image", "id": img_id },
+            { "kind": "group", "id": grp.id }
+        ],
+        "rating": 5
+    })
+    .to_string();
+
+    // 1. Unauthenticated -> 401
+    let unauth = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(unauth.status, 401);
+
+    // Login with PIN
+    let pin_body = format!(r#"{{"pin":"{}"}}"#, status.pin);
+    let pin_ok = send_raw_http(
+        port,
+        "POST",
+        "/api/auth/pin",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        pin_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(pin_ok.status, 200);
+    let cookie = pin_ok
+        .headers
+        .get("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // 2. ReadOnly mode -> 403
+    let ro_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(ro_res.status, 403);
+
+    // Switch to ReadWrite
+    handle.set_mode(LanAccessMode::ReadWrite);
+
+    // 3. Missing X-Tuck-Client header -> 403
+    let no_csrf = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(no_csrf.status, 403);
+
+    // 4. Out-of-range rating -> 400
+    let invalid_payload = serde_json::json!({
+        "entries": [
+            { "kind": "image", "id": img_id }
+        ],
+        "rating": 6
+    })
+    .to_string();
+    let bad_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        invalid_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(bad_res.status, 400);
+
+    // 5. ReadWrite + Cookie + CSRF -> 200 and query minRating=5 returns 2 entries
+    let ok_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(ok_res.status, 200);
+    let report: serde_json::Value = serde_json::from_slice(&ok_res.body).unwrap();
+    assert_eq!(report["targetCount"], 2);
+    assert_eq!(report["updatedCount"], 2);
+
+    {
+        let g = state.lock_db().unwrap();
+        let db_ref = g.as_ref().unwrap();
+        assert_eq!(db_ref.get_item_detail(&img_id).unwrap().rating, 5);
+        assert_eq!(db_ref.get_group_detail(&grp.id).unwrap().rating, 5);
+    }
+
+    let query_payload = serde_json::json!({
+        "scope": { "kind": "all" },
+        "minRating": 5
+    })
+    .to_string();
+    let query_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/query",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        query_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(query_res.status, 200);
+    let query_entries: Vec<serde_json::Value> = serde_json::from_slice(&query_res.body).unwrap();
+    assert_eq!(query_entries.len(), 2);
+
+    // 6. Idempotent re-application -> 200, updatedCount == 0
+    let idem_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(idem_res.status, 200);
+    let idem_report: serde_json::Value = serde_json::from_slice(&idem_res.body).unwrap();
+    assert_eq!(idem_report["targetCount"], 2);
+    assert_eq!(idem_report["updatedCount"], 0);
+
+    // 7. Clear rating with 0 -> 200, updatedCount == 2
+    let clear_payload = serde_json::json!({
+        "entries": [
+            { "kind": "image", "id": img_id },
+            { "kind": "group", "id": grp.id }
+        ],
+        "rating": 0
+    })
+    .to_string();
+    let clear_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/rating/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        clear_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(clear_res.status, 200);
+    let clear_report: serde_json::Value = serde_json::from_slice(&clear_res.body).unwrap();
+    assert_eq!(clear_report["targetCount"], 2);
+    assert_eq!(clear_report["updatedCount"], 2);
+
+    {
+        let g = state.lock_db().unwrap();
+        let db_ref = g.as_ref().unwrap();
+        assert_eq!(db_ref.get_item_detail(&img_id).unwrap().rating, 0);
+        assert_eq!(db_ref.get_group_detail(&grp.id).unwrap().rating, 0);
+    }
+
+    handle.stop("test_done");
+}

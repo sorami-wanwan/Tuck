@@ -30,7 +30,9 @@ import {
 } from "../types/vault";
 import { formatBytes } from "../utils/format";
 import { formatShortcutLabel } from "../utils/formatShortcut";
+import { formatSelectionRatingStatus, summarizeSelectionRating } from "../utils/bulkRating";
 import { isImeComposing, normalizeTagKey, summarizeSelectionTags } from "../utils/bulkTags";
+import { BatchRatingControl } from "./BatchRatingControl";
 
 interface InspectorProps {
   mode: "empty" | "image" | "group" | "multi";
@@ -54,6 +56,8 @@ interface InspectorProps {
   onCopyToast?: (message: string) => void;
   onAddTag: (id: string, tagName: string) => Promise<void>;
   onRemoveTag: (id: string, tagName: string) => Promise<void>;
+  onBatchSetRating?: (rating: number) => Promise<void>;
+  batchRatingBusy?: boolean;
   onBatchUpdateTags?: (addTags: string[], removeTags: string[]) => Promise<void>;
   onOpenBulkTagDialog?: () => void;
   onAddToFolder: (folderId: string) => Promise<void>;
@@ -102,6 +106,8 @@ export function Inspector(props: InspectorProps) {
     onCopyToast,
     onAddTag,
     onRemoveTag,
+    onBatchSetRating,
+    batchRatingBusy = false,
     onBatchUpdateTags,
     onOpenBulkTagDialog,
     onAddToFolder,
@@ -221,6 +227,11 @@ export function Inspector(props: InspectorProps) {
     [mode, selectedEntriesMeta]
   );
 
+  const multiRatingSummary = useMemo(
+    () => (mode === "multi" ? summarizeSelectionRating(selectedEntriesMeta ?? []) : null),
+    [mode, selectedEntriesMeta]
+  );
+
   const multiSuggestions = useMemo(() => {
     if (mode !== "multi" || !multiTagFocused) return [];
     const allAttached = new Set(
@@ -291,6 +302,36 @@ export function Inspector(props: InspectorProps) {
           </div>
 
           {!readOnly && !inTrash && standaloneSelectedActions()}
+
+          {multiRatingSummary && (
+            <div className="inspector-field-group">
+              <div className="inspector-section-header">
+                <span className="section-label">評価</span>
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span className="multi-rating-status tabular-nums">
+                    {formatSelectionRatingStatus(multiRatingSummary)}
+                  </span>
+                  {!readOnly && !inTrash && onBatchSetRating && multiRatingSummary.ratedCount > 0 && (
+                    <button
+                      type="button"
+                      className="inspector-inline-link"
+                      disabled={batchRatingBusy}
+                      onClick={() => void onBatchSetRating(0)}
+                    >
+                      解除
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="multi-rating-panel">
+                <BatchRatingControl
+                  summary={multiRatingSummary}
+                  disabled={readOnly || inTrash || !onBatchSetRating || batchRatingBusy}
+                  onSelectRating={(rating) => void onBatchSetRating?.(rating)}
+                />
+              </div>
+            </div>
+          )}
 
           <div className="inspector-field-group">
             <div className="inspector-section-header">

@@ -18,6 +18,8 @@ import {
   Maximize2,
   Play,
   RotateCcw,
+  Star,
+  StarOff,
   Tags,
   Trash2,
   Unlink,
@@ -25,6 +27,7 @@ import {
 import type { ContextMenuItem } from "../components/ContextMenu";
 import { imageMemoryCache } from "../services/imageCache";
 import { formatErrorMessage, vaultApi } from "../services/vaultApi";
+import { summarizeSelectionRating } from "../utils/bulkRating";
 import {
   entryKey,
   isVideoMime,
@@ -51,6 +54,7 @@ interface UseGallerySelectionOptions {
   onOpenExportPackageForEntries: (entries: EntryRef[]) => void;
   onPlainExport: (target: PlainExportTarget) => void;
   onOpenBulkTagDialog: () => void;
+  onBatchSetRating: (entries: EntryRef[], rating: number) => Promise<void>;
   pushToast: (tone: ToastItem["tone"], message: string) => void;
 }
 
@@ -70,6 +74,7 @@ export function useGallerySelection({
   onOpenExportPackageForEntries,
   onPlainExport,
   onOpenBulkTagDialog,
+  onBatchSetRating,
   pushToast,
 }: UseGallerySelectionOptions) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
@@ -479,6 +484,36 @@ export function useGallerySelection({
       onClick: onOpenBulkTagDialog,
     });
 
+    const ratingSummary = summarizeSelectionRating(selectedEntriesMeta);
+    itemsList.push({
+      id: "set-rating",
+      label: "評価を設定...",
+      icon: <Star size={13} />,
+      children: [
+        ...[5, 4, 3, 2, 1].map((star) => ({
+          id: `rating-${star}`,
+          label: `${"★".repeat(star)}${"☆".repeat(5 - star)} (${star})`,
+          icon: (
+            <Star
+              size={12}
+              fill="currentColor"
+              style={{ color: "var(--star-gold)", flexShrink: 0 }}
+            />
+          ),
+          checked: ratingSummary.uniformRating === star,
+          onClick: () => void onBatchSetRating([...selectedEntryRefs], star),
+        })),
+        {
+          id: "rating-clear",
+          label: "評価を解除",
+          icon: <StarOff size={12} style={{ flexShrink: 0 }} />,
+          separatorBefore: true,
+          disabled: ratingSummary.ratedCount === 0,
+          onClick: () => void onBatchSetRating([...selectedEntryRefs], 0),
+        },
+      ],
+    });
+
     if (standaloneSelectedCount >= 2) {
       itemsList.push({
         id: "bundle",
@@ -564,6 +599,7 @@ export function useGallerySelection({
     canEdit,
     isWebClient,
     selectedEntryRefs,
+    selectedEntriesMeta,
     singleSelectedEntry,
     isTrashView,
     folders,
@@ -577,6 +613,7 @@ export function useGallerySelection({
     onOpenExportPackageForEntries,
     onPlainExport,
     onOpenBulkTagDialog,
+    onBatchSetRating,
   ]);
 
   return {

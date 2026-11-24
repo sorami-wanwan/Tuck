@@ -82,6 +82,11 @@ export function App() {
 
   const [lockSettingsOpen, setLockSettingsOpen] = useState(false);
   const [bulkTagDialogOpen, setBulkTagDialogOpen] = useState(false);
+  const [batchRatingBusy, setBatchRatingBusy] = useState(false);
+  const batchRatingBusyRef = useRef(false);
+  const applyBatchRatingRef = useRef<(entries: EntryRef[], rating: number) => Promise<void>>(
+    async () => {}
+  );
   const [maintenanceModal, setMaintenanceModal] = useState<{
     open: boolean;
     initialTab: MaintenanceTab;
@@ -162,6 +167,12 @@ export function App() {
     });
   }, []);
 
+  const triggerBatchSetRating = useCallback(
+    (targetEntries: EntryRef[], rating: number) =>
+      applyBatchRatingRef.current(targetEntries, rating),
+    []
+  );
+
   const gallery = useGallerySelection({
     isOpen: status.isOpen,
     entries,
@@ -175,6 +186,7 @@ export function App() {
     onOpenExportPackageForEntries: handleOpenExportPackageForEntries,
     onPlainExport: requestPlainExport,
     onOpenBulkTagDialog: () => setBulkTagDialogOpen(true),
+    onBatchSetRating: triggerBatchSetRating,
     pushToast,
   });
   syncSelectionRef.current = gallery.syncSelectionWithEntries;
@@ -269,6 +281,8 @@ export function App() {
     resetPlainExportState();
     setLockSettingsOpen(false);
     setBulkTagDialogOpen(false);
+    batchRatingBusyRef.current = false;
+    setBatchRatingBusy(false);
     setMobileDrawerOpen(false);
     setMobileSelectMode(false);
     importFlow.closeUrlImportDialog();
@@ -391,6 +405,54 @@ export function App() {
       refreshLibrary,
     ]
   );
+
+  const applyBatchRatingUpdate = useCallback(
+    async (targetEntries: EntryRef[], rating: number) => {
+      if (targetEntries.length === 0 || batchRatingBusyRef.current) return;
+      batchRatingBusyRef.current = true;
+      setBatchRatingBusy(true);
+      try {
+        const report = await vaultApi.batchSetEntryRating(targetEntries, rating);
+        if (rating === 0) {
+          if (report.updatedCount > 0) {
+            pushToast("info", `${report.updatedCount}件の評価を解除しました`);
+          } else if (report.targetCount > 0) {
+            pushToast("info", "選択した項目はすでに未評価です");
+          }
+        } else if (report.updatedCount > 0) {
+          pushToast("success", `${report.updatedCount}件の評価を ★${rating} に設定しました`);
+        } else if (report.targetCount > 0) {
+          pushToast("info", `選択した項目はすでに ★${rating} です`);
+        }
+
+        if (gallery.selectedEntryRefs.length === 1) {
+          const singleRef = gallery.selectedEntryRefs[0];
+          if (targetEntries.some((t) => t.kind === singleRef.kind && t.id === singleRef.id)) {
+            if (singleRef.kind === "image") {
+              gallery.setItemDetail(await vaultApi.getItemDetail(singleRef.id));
+            } else {
+              gallery.setGroupDetail(await vaultApi.getGroupDetail(singleRef.id));
+            }
+          }
+        }
+
+        await refreshLibrary();
+      } catch (err) {
+        pushToast("error", formatErrorMessage(err));
+      } finally {
+        batchRatingBusyRef.current = false;
+        setBatchRatingBusy(false);
+      }
+    },
+    [
+      gallery.selectedEntryRefs,
+      gallery.setItemDetail,
+      gallery.setGroupDetail,
+      pushToast,
+      refreshLibrary,
+    ]
+  );
+  applyBatchRatingRef.current = applyBatchRatingUpdate;
 
   const internalDrag = useInternalDrag({
     onDropEntriesToFolder: (refs, folderId) => {
@@ -666,6 +728,7 @@ export function App() {
           <ThumbnailGrid
             entries={entries}
             selectedKeys={gallery.selectedKeys}
+            selectedEntriesMeta={gallery.selectedEntriesMeta}
             primaryKey={gallery.primaryKey}
             thumbSize={thumbSize}
             fitMode={fitMode}
@@ -677,6 +740,7 @@ export function App() {
             isWebClient={isWebClient}
             isTouchDevice={isTouchDevice}
             selectionMode={mobileSelectMode}
+            batchRatingBusy={batchRatingBusy}
             onCardClick={gallery.handleCardClick}
             onSelectAll={gallery.selectAllEntries}
             onClearSelection={gallery.clearSelection}
@@ -704,6 +768,9 @@ export function App() {
             onImportFiles={() => void importFlow.handleImportFiles()}
             onAvifCompleted={() => void refreshLibrary()}
             onCreateGroupFromSelection={() => void gallery.handleCreateGroupFromSelection()}
+            onBatchSetRating={(rating) =>
+              void applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
+            }
             onOpenBulkTagDialog={() => setBulkTagDialogOpen(true)}
             onRemoveSelectionFromFolder={() => {
               if (!currentFolderId || gallery.selectedEntryRefs.length === 0) return;
@@ -833,6 +900,10 @@ export function App() {
                   }
                   await refreshLibrary();
                 }}
+                onBatchSetRating={(rating) =>
+                  applyBatchRatingUpdate(gallery.selectedEntryRefs, rating)
+                }
+                batchRatingBusy={batchRatingBusy}
                 onBatchUpdateTags={(addTags, removeTags) =>
                   applyBatchTagUpdate(gallery.selectedEntryRefs, addTags, removeTags).catch(
                     (err) => pushToast("error", formatErrorMessage(err))

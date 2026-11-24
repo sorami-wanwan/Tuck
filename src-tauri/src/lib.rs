@@ -371,6 +371,7 @@ pub fn run() {
             commands::add_item_tag,
             commands::remove_item_tag,
             commands::batch_update_entry_tags,
+            commands::batch_set_entry_rating,
             commands::list_tags,
             commands::list_folders,
             commands::create_folder,

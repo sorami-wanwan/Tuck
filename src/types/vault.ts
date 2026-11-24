@@ -209,6 +209,11 @@ export interface BatchTagReport {
   updatedCount: number;
 }
 
+export interface BatchRatingReport {
+  targetCount: number;
+  updatedCount: number;
+}
+
 export type QueryScope =
   | { kind: "all" }
   | { kind: "uncategorized" }

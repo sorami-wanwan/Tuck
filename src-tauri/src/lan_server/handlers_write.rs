@@ -58,6 +58,13 @@ pub(super) struct BatchEntryTagsBody {
     remove_tags: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BatchEntryRatingBody {
+    entries: Vec<EntryRef>,
+    rating: i32,
+}
+
 pub(super) async fn handle_set_item_title(
     State(runtime): State<Arc<LanServerRuntime>>,
     headers: HeaderMap,
@@ -138,6 +145,22 @@ pub(super) async fn handle_batch_update_entry_tags(
     require_write_checked(&runtime, &headers)?;
     let res = run_db(&runtime, move |db| {
         db.batch_update_entry_tags(&body.entries, &body.add_tags, &body.remove_tags)
+    })
+    .await?;
+    if res.updated_count > 0 {
+        notify_changed(&runtime);
+    }
+    Ok(Json(res).into_response())
+}
+
+pub(super) async fn handle_batch_set_entry_rating(
+    State(runtime): State<Arc<LanServerRuntime>>,
+    headers: HeaderMap,
+    Json(body): Json<BatchEntryRatingBody>,
+) -> Result<Response, LanApiError> {
+    require_write_checked(&runtime, &headers)?;
+    let res = run_db(&runtime, move |db| {
+        db.batch_set_entry_rating(&body.entries, body.rating)
     })
     .await?;
     if res.updated_count > 0 {

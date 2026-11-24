@@ -193,7 +193,9 @@
   .sidebar-drawer-host,
   .lightbox-hud,
   .lightbox-nav-btn,
-  .reader-scrubber {
+  .reader-scrubber,
+  .star-btn,
+  .star-clear-btn {
     transition: none;
   }
 }
@@ -211,6 +213,13 @@
   .mode-pill-btn {
     min-inline-size: var(--target-size);
     min-block-size: var(--target-size);
+  }
+
+  .multi-rating-panel .star-btn,
+  .multi-rating-group .star-btn,
+  .star-clear-btn {
+    min-inline-size: 32px;
+    min-block-size: 36px;
   }
 
   .nav-item,

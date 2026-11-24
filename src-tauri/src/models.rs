@@ -218,6 +218,13 @@ pub struct BatchTagReport {
     pub updated_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRatingReport {
+    pub target_count: usize,
+    pub updated_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SortBy {

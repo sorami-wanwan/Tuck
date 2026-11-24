@@ -357,8 +357,13 @@
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
-.inspector-inline-link:hover {
+.inspector-inline-link:hover:not(:disabled) {
   background: var(--accent-blue-soft);
+}
+
+.inspector-inline-link:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .tag-chips-wrap {
@@ -498,16 +503,76 @@
   color: var(--text-muted);
   display: inline-grid;
   place-items: center;
+  border-radius: 4px;
   transition: transform 0.1s ease, color 0.1s ease;
 }
 
-.star-btn:hover {
-  transform: scale(1.15);
+.star-btn:focus-visible,
+.star-clear-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.star-btn:disabled,
+.star-clear-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (hover: hover) {
+  .star-btn:hover:not(:disabled) {
+    transform: scale(1.15);
+    color: var(--star-gold);
+  }
+}
+
+.star-btn.filled,
+.star-btn.preview {
   color: var(--star-gold);
 }
 
-.star-btn.filled {
-  color: var(--star-gold);
+.star-clear-btn {
+  border: none;
+  background: transparent;
+  padding: 2px;
+  margin-inline-start: 2px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  display: inline-grid;
+  place-items: center;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+@media (hover: hover) {
+  .star-clear-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+}
+
+.multi-rating-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.multi-rating-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.multi-rating-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
 }
 
 .inspector-actions {
@@ -709,8 +774,11 @@
   inset-inline-start: 50%;
   transform: translateX(-50%);
   z-index: 35;
+  max-inline-size: calc(100dvw - 24px);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   padding: 8px 12px;
   border-radius: var(--radius-lg);
@@ -752,6 +820,11 @@
 
 .context-menu-item:hover:not(:disabled) {
   background: var(--bg-active);
+}
+
+.context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .context-menu-item.danger {

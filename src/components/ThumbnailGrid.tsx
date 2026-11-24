@@ -31,10 +31,14 @@ import {
   type GalleryEntry,
   type ThumbFitMode,
 } from "../types/vault";
+import { formatSelectionRatingStatus, summarizeSelectionRating } from "../utils/bulkRating";
+import { isImeComposing } from "../utils/bulkTags";
+import { BatchRatingControl } from "./BatchRatingControl";
 
 interface ThumbnailGridProps {
   entries: GalleryEntry[];
   selectedKeys: Set<string>;
+  selectedEntriesMeta?: GalleryEntry[];
   primaryKey: string | null;
   thumbSize: number;
   fitMode: ThumbFitMode;
@@ -46,6 +50,7 @@ interface ThumbnailGridProps {
   isWebClient?: boolean;
   isTouchDevice?: boolean;
   selectionMode?: boolean;
+  batchRatingBusy?: boolean;
   onCardClick: (entry: GalleryEntry, e: MouseEvent) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
@@ -56,6 +61,7 @@ interface ThumbnailGridProps {
   onImportFiles: () => void;
   onAvifCompleted: () => void;
   onCreateGroupFromSelection: () => void;
+  onBatchSetRating?: (rating: number) => void;
   onOpenBulkTagDialog?: () => void;
   onRemoveSelectionFromFolder: () => void;
   onPlainExportSelection?: () => void;
@@ -268,6 +274,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
   const {
     entries,
     selectedKeys,
+    selectedEntriesMeta,
     primaryKey,
     thumbSize,
     fitMode,
@@ -279,6 +286,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     isWebClient = false,
     isTouchDevice = false,
     selectionMode = false,
+    batchRatingBusy = false,
     onCardClick,
     onSelectAll,
     onClearSelection,
@@ -289,6 +297,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     onImportFiles,
     onAvifCompleted,
     onCreateGroupFromSelection,
+    onBatchSetRating,
     onOpenBulkTagDialog,
     onRemoveSelectionFromFolder,
     onPlainExportSelection,
@@ -347,6 +356,11 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     [entries, selectedKeys]
   );
 
+  const selectionRatingSummary = useMemo(
+    () => summarizeSelectionRating(selectedEntriesMeta ?? []),
+    [selectedEntriesMeta]
+  );
+
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
       e.preventDefault();
@@ -354,6 +368,36 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
       return;
     }
     if (entries.length === 0) return;
+
+    const targetEl = e.target as HTMLElement | null;
+    if (
+      targetEl &&
+      (targetEl.tagName === "INPUT" ||
+        targetEl.tagName === "TEXTAREA" ||
+        targetEl.tagName === "SELECT" ||
+        targetEl.isContentEditable)
+    ) {
+      return;
+    }
+
+    if (
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.repeat &&
+      !isImeComposing(e) &&
+      canEdit &&
+      !isTrashView &&
+      onBatchSetRating &&
+      selectedKeys.size >= 1 &&
+      !batchRatingBusy &&
+      e.key >= "0" &&
+      e.key <= "5"
+    ) {
+      e.preventDefault();
+      onBatchSetRating(Number(e.key));
+      return;
+    }
 
     const curIndex = primaryKey
       ? entries.findIndex((item) => entryKey({ kind: item.kind, id: item.id }) === primaryKey)
@@ -503,6 +547,20 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
           <span className="tabular-nums" style={{ fontWeight: 600, fontSize: 12, paddingInline: 4 }}>
             {selectedKeys.size}件選択中
           </span>
+          {canEdit && onBatchSetRating && (
+            <div
+              className="multi-rating-group"
+              title={formatSelectionRatingStatus(selectionRatingSummary)}
+            >
+              <BatchRatingControl
+                summary={selectionRatingSummary}
+                disabled={batchRatingBusy}
+                showClearButton
+                starSize={14}
+                onSelectRating={onBatchSetRating}
+              />
+            </div>
+          )}
           {canEdit && standaloneSelectedCount >= 2 && (
             <button type="button" className="btn btn-primary" onClick={onCreateGroupFromSelection}>
               <Layers size={13} />

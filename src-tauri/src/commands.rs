@@ -14,12 +14,12 @@ use crate::error::VaultError;
 use crate::imaging::is_video_mime;
 use crate::lan_server::{list_lan_interfaces, start_lan_server, AssetSource, LanHostNotifier};
 use crate::models::{
-    natural_cmp, BackupReport, BatchTagReport, EntryKind, EntryRef, FolderNode, GalleryEntry,
-    GroupDetail, ImportReport, ItemDetail, LanAccessMode, LanInterfaceInfo, LanShareStatus,
-    LockSettings, OptimizeReport, PackageExportReport, PackageExportRequest, PackageImportReport,
-    PackageImportRequest, PlainExportBatchRequest, PlainExportItemRequest, PlainExportReport,
-    SearchQuery, StartLanShareRequest, TagWithCount, UrlImportSettings, VaultHealthInfo,
-    VaultStatus, YtdlpStatus,
+    natural_cmp, BackupReport, BatchRatingReport, BatchTagReport, EntryKind, EntryRef, FolderNode,
+    GalleryEntry, GroupDetail, ImportReport, ItemDetail, LanAccessMode, LanInterfaceInfo,
+    LanShareStatus, LockSettings, OptimizeReport, PackageExportReport, PackageExportRequest,
+    PackageImportReport, PackageImportRequest, PlainExportBatchRequest, PlainExportItemRequest,
+    PlainExportReport, SearchQuery, StartLanShareRequest, TagWithCount, UrlImportSettings,
+    VaultHealthInfo, VaultStatus, YtdlpStatus,
 };
 use crate::package;
 use crate::plain_export;
@@ -728,6 +728,19 @@ pub fn batch_update_entry_tags(
     let res = with_open_db(&state.db, |db| {
         db.batch_update_entry_tags(&entries, &add_tags, &remove_tags)
     })?;
+    if res.updated_count > 0 {
+        state.notify_lan_library_changed();
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn batch_set_entry_rating(
+    state: State<'_, AppState>,
+    entries: Vec<EntryRef>,
+    rating: i32,
+) -> Result<BatchRatingReport, VaultError> {
+    let res = with_open_db(&state.db, |db| db.batch_set_entry_rating(&entries, rating))?;
     if res.updated_count > 0 {
         state.notify_lan_library_changed();
     }

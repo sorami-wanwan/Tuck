@@ -11,7 +11,9 @@ use crate::error::VaultError;
 use crate::imaging::{
     detect_mime, is_video_mime, process_client_png_thumbnail, process_image_bytes,
 };
-use crate::models::{BatchTagReport, EntryKind, EntryRef, ItemDetail, TagWithCount};
+use crate::models::{
+    BatchRatingReport, BatchTagReport, EntryKind, EntryRef, ItemDetail, TagWithCount,
+};
 
 use super::schema::{BLOB_CHUNK_SIZE, CHUNK_STORAGE_THRESHOLD};
 use super::{
@@ -790,6 +792,89 @@ impl VaultDb {
         Ok(BatchTagReport {
             target_count,
             updated_count: touched_items.len() + touched_groups.len(),
+        })
+    }
+
+    pub fn batch_set_entry_rating(
+        &mut self,
+        entries: &[EntryRef],
+        rating: i32,
+    ) -> Result<BatchRatingReport, VaultError> {
+        if !(0..=5).contains(&rating) {
+            return Err(VaultError::InvalidInput(
+                "評価は 0〜5 の範囲で指定してください".to_string(),
+            ));
+        }
+        if entries.is_empty() {
+            return Ok(BatchRatingReport {
+                target_count: 0,
+                updated_count: 0,
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        let mut seen_items: HashSet<String> = HashSet::new();
+        let mut seen_groups: HashSet<String> = HashSet::new();
+        let mut target_count = 0usize;
+        let mut updated_count = 0usize;
+
+        for entry in entries {
+            match entry.kind {
+                EntryKind::Image => {
+                    if !seen_items.insert(entry.id.clone()) {
+                        continue;
+                    }
+                    let current: Option<i32> = tx
+                        .query_row(
+                            "SELECT rating FROM items
+                             WHERE id = ?1
+                               AND deleted_at IS NULL
+                               AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
+                            params![entry.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(current_rating) = current {
+                        target_count += 1;
+                        if current_rating != rating {
+                            tx.execute(
+                                "UPDATE items SET rating = ?2, updated_at = ?3 WHERE id = ?1",
+                                params![entry.id, rating, now],
+                            )?;
+                            updated_count += 1;
+                        }
+                    }
+                }
+                EntryKind::Group => {
+                    if !seen_groups.insert(entry.id.clone()) {
+                        continue;
+                    }
+                    let current: Option<i32> = tx
+                        .query_row(
+                            "SELECT rating FROM groups WHERE id = ?1 AND deleted_at IS NULL",
+                            params![entry.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(current_rating) = current {
+                        target_count += 1;
+                        if current_rating != rating {
+                            tx.execute(
+                                "UPDATE groups SET rating = ?2, updated_at = ?3 WHERE id = ?1",
+                                params![entry.id, rating, now],
+                            )?;
+                            updated_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(BatchRatingReport {
+            target_count,
+            updated_count,
         })
     }
 

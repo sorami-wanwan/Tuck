@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 
 export interface ContextMenuItem {
   id: string;
   label: string;
   icon?: ReactNode;
+  checked?: boolean;
   danger?: boolean;
   disabled?: boolean;
   separatorBefore?: boolean;
@@ -90,22 +91,38 @@ export function ContextMenu({ open, x, y, items, onClose }: ContextMenuProps) {
               {openSubId === item.id && (
                 <div className="context-submenu" role="menu">
                   {item.children.map((sub) => (
-                    <button
-                      key={sub.id}
-                      type="button"
-                      role="menuitem"
-                      className={`context-menu-item ${sub.danger ? "danger" : ""}`}
-                      disabled={sub.disabled}
-                      onClick={() => {
-                        sub.onClick?.();
-                        onClose();
-                      }}
-                    >
-                      {sub.icon}
-                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {sub.label}
-                      </span>
-                    </button>
+                    <div key={sub.id}>
+                      {sub.separatorBefore && <div className="context-menu-sep" />}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={`context-menu-item ${sub.danger ? "danger" : ""}`}
+                        disabled={sub.disabled}
+                        onClick={() => {
+                          sub.onClick?.();
+                          onClose();
+                        }}
+                      >
+                        {sub.icon}
+                        <span
+                          style={{
+                            flex: 1,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {sub.label}
+                        </span>
+                        {sub.checked && (
+                          <Check
+                            size={12}
+                            aria-hidden="true"
+                            style={{ flexShrink: 0, color: "var(--accent-blue)" }}
+                          />
+                        )}
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}

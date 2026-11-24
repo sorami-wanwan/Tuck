@@ -1266,3 +1266,160 @@ fn test_batch_update_entry_tags_mixed_nfc_and_pruning() {
     let err = db.batch_update_entry_tags(&mixed_refs, &["   ".to_string()], &[]);
     assert!(matches!(err, Err(VaultError::InvalidInput(_))));
 }
+
+#[test]
+fn test_batch_set_entry_rating_mixed_idempotent_and_guards() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("batch_rating.vault");
+    let mut db = VaultDb::create(&vault_path, "pass-rating", false).unwrap();
+
+    let id1 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 10, 20, 30, 255),
+        Some("img1"),
+    );
+    let id2 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 40, 50, 60, 255),
+        Some("img2"),
+    );
+    let p1 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 70, 80, 90, 255),
+        Some("p1"),
+    );
+    let p2 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 100, 110, 120, 255),
+        Some("p2"),
+    );
+    let trashed_id = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 130, 140, 150, 255),
+        Some("trashed"),
+    );
+
+    let group = db
+        .create_group_from_items(&[p1.clone(), p2], Some("grp"), None)
+        .unwrap();
+    db.move_entries_to_trash(&[EntryRef {
+        kind: EntryKind::Image,
+        id: trashed_id.clone(),
+    }])
+    .unwrap();
+
+    let mixed_refs = vec![
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id1.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id2.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: group.id.clone(),
+        },
+    ];
+
+    // 1. Mixed standalone images + manga group -> all updated to 4
+    let r1 = db.batch_set_entry_rating(&mixed_refs, 4).unwrap();
+    assert_eq!(r1.target_count, 3);
+    assert_eq!(r1.updated_count, 3);
+
+    let d1_first = db.get_item_detail(&id1).unwrap();
+    let d2_first = db.get_item_detail(&id2).unwrap();
+    let dg_first = db.get_group_detail(&group.id).unwrap();
+    assert_eq!(d1_first.rating, 4);
+    assert_eq!(d2_first.rating, 4);
+    assert_eq!(dg_first.rating, 4);
+
+    // 2. Idempotent re-application -> updated_count == 0 and updated_at unchanged
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let r2 = db.batch_set_entry_rating(&mixed_refs, 4).unwrap();
+    assert_eq!(r2.target_count, 3);
+    assert_eq!(r2.updated_count, 0);
+    assert_eq!(
+        db.get_item_detail(&id1).unwrap().updated_at,
+        d1_first.updated_at
+    );
+    assert_eq!(
+        db.get_group_detail(&group.id).unwrap().updated_at,
+        dg_first.updated_at
+    );
+
+    // 3. Duplicate EntryRef entries are deduplicated, then updated to 2 and cleared to 0
+    let dup_refs = vec![
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id1.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id2.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id2.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: group.id.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: group.id.clone(),
+        },
+    ];
+    let r3 = db.batch_set_entry_rating(&dup_refs, 2).unwrap();
+    assert_eq!(r3.target_count, 3);
+    assert_eq!(r3.updated_count, 3);
+    assert_eq!(db.get_item_detail(&id1).unwrap().rating, 2);
+    assert_eq!(db.get_item_detail(&id2).unwrap().rating, 2);
+    assert_eq!(db.get_group_detail(&group.id).unwrap().rating, 2);
+
+    let r4 = db.batch_set_entry_rating(&dup_refs, 0).unwrap();
+    assert_eq!(r4.target_count, 3);
+    assert_eq!(r4.updated_count, 3);
+    assert_eq!(db.get_item_detail(&id1).unwrap().rating, 0);
+    assert_eq!(db.get_item_detail(&id2).unwrap().rating, 0);
+    assert_eq!(db.get_group_detail(&group.id).unwrap().rating, 0);
+
+    // 4. Trashed item, missing IDs, and group member page must be skipped
+    let invalid_refs = vec![
+        EntryRef {
+            kind: EntryKind::Image,
+            id: trashed_id,
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: "nonexistent".to_string(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: "nonexistent-group".to_string(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: p1.clone(),
+        },
+    ];
+    let r5 = db.batch_set_entry_rating(&invalid_refs, 5).unwrap();
+    assert_eq!(r5.target_count, 0);
+    assert_eq!(r5.updated_count, 0);
+    assert_eq!(db.get_item_detail(&p1).unwrap().rating, 0);
+
+    // 5. Out-of-range rating returns InvalidInput even when entries is empty; empty + valid returns 0
+    assert!(matches!(
+        db.batch_set_entry_rating(&mixed_refs, -1),
+        Err(VaultError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        db.batch_set_entry_rating(&[], 6),
+        Err(VaultError::InvalidInput(_))
+    ));
+    let r_empty = db.batch_set_entry_rating(&[], 3).unwrap();
+    assert_eq!(r_empty.target_count, 0);
+    assert_eq!(r_empty.updated_count, 0);
+}

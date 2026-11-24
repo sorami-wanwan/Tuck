@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BackupReport,
+  BatchRatingReport,
   BatchTagReport,
   EntryRef,
   FolderNode,
@@ -406,6 +407,16 @@ export const vaultApi = {
       entries,
       addTags,
       removeTags,
+    });
+  },
+
+  batchSetEntryRating(entries: EntryRef[], rating: number): Promise<BatchRatingReport> {
+    if (isTauriRuntime()) {
+      return invoke("batch_set_entry_rating", { entries, rating });
+    }
+    return webJson<BatchRatingReport>("/api/entries/rating/batch", "POST", {
+      entries,
+      rating,
     });
   },
 
