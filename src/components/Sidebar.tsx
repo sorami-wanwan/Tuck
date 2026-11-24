@@ -664,12 +664,19 @@ export function Sidebar({
           ) : (
             filteredTags.map((tag) => {
               const isSelected = activeTagSet.has(tag.name.toLowerCase());
+              const isTagDropTarget =
+                hoverDropTarget?.type === "tag" && hoverDropTarget.tagName === tag.name;
               return (
                 <button
                   key={tag.id}
                   type="button"
-                  className={`nav-item ${isSelected ? "active" : ""}`}
-                  title={`${tag.name} (${tag.count}件) — クリックで絞り込み（複数選択可）`}
+                  data-drop-tag-name={canEdit ? tag.name : undefined}
+                  className={`nav-item ${isSelected ? "active" : ""} ${
+                    isTagDropTarget ? "drop-target-active" : ""
+                  }`}
+                  title={`${tag.name} (${tag.count}件) — クリックで絞り込み（複数選択可）${
+                    canEdit ? " / ドロップでタグ付与" : ""
+                  }`}
                   onClick={() => onToggleTag(tag.name)}
                 >
                   <Hash size={14} className="nav-item-icon" />

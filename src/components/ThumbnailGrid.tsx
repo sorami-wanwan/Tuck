@@ -18,6 +18,7 @@ import {
   Play,
   RotateCcw,
   Star,
+  Tags,
   Trash2,
   X,
 } from "lucide-react";
@@ -55,6 +56,7 @@ interface ThumbnailGridProps {
   onImportFiles: () => void;
   onAvifCompleted: () => void;
   onCreateGroupFromSelection: () => void;
+  onOpenBulkTagDialog?: () => void;
   onRemoveSelectionFromFolder: () => void;
   onPlainExportSelection?: () => void;
   onMoveSelectionToTrash: () => void;
@@ -287,6 +289,7 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     onImportFiles,
     onAvifCompleted,
     onCreateGroupFromSelection,
+    onOpenBulkTagDialog,
     onRemoveSelectionFromFolder,
     onPlainExportSelection,
     onMoveSelectionToTrash,
@@ -504,6 +507,12 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
             <button type="button" className="btn btn-primary" onClick={onCreateGroupFromSelection}>
               <Layers size={13} />
               漫画グループにまとめる ({standaloneSelectedCount})
+            </button>
+          )}
+          {canEdit && onOpenBulkTagDialog && (
+            <button type="button" className="btn" onClick={onOpenBulkTagDialog}>
+              <Tags size={13} />
+              タグを編集...
             </button>
           )}
           {onPlainExportSelection && (

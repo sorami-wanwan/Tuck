@@ -14,9 +14,9 @@ use crate::error::VaultError;
 use crate::imaging::is_video_mime;
 use crate::lan_server::{list_lan_interfaces, start_lan_server, AssetSource, LanHostNotifier};
 use crate::models::{
-    natural_cmp, BackupReport, EntryKind, EntryRef, FolderNode, GalleryEntry, GroupDetail,
-    ImportReport, ItemDetail, LanAccessMode, LanInterfaceInfo, LanShareStatus, LockSettings,
-    OptimizeReport, PackageExportReport, PackageExportRequest, PackageImportReport,
+    natural_cmp, BackupReport, BatchTagReport, EntryKind, EntryRef, FolderNode, GalleryEntry,
+    GroupDetail, ImportReport, ItemDetail, LanAccessMode, LanInterfaceInfo, LanShareStatus,
+    LockSettings, OptimizeReport, PackageExportReport, PackageExportRequest, PackageImportReport,
     PackageImportRequest, PlainExportBatchRequest, PlainExportItemRequest, PlainExportReport,
     SearchQuery, StartLanShareRequest, TagWithCount, UrlImportSettings, VaultHealthInfo,
     VaultStatus, YtdlpStatus,
@@ -715,6 +715,22 @@ pub fn remove_item_tag(
 ) -> Result<ItemDetail, VaultError> {
     let res = with_open_db(&state.db, |db| db.remove_tag(&item_id, &tag_name))?;
     state.notify_lan_library_changed();
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn batch_update_entry_tags(
+    state: State<'_, AppState>,
+    entries: Vec<EntryRef>,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
+) -> Result<BatchTagReport, VaultError> {
+    let res = with_open_db(&state.db, |db| {
+        db.batch_update_entry_tags(&entries, &add_tags, &remove_tags)
+    })?;
+    if res.updated_count > 0 {
+        state.notify_lan_library_changed();
+    }
     Ok(res)
 }
 

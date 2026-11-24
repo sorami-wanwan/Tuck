@@ -48,6 +48,15 @@ pub(super) struct SourceUrlBody {
 pub(super) struct TagBody {
     tag_name: String,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BatchEntryTagsBody {
+    entries: Vec<EntryRef>,
+    #[serde(default)]
+    add_tags: Vec<String>,
+    #[serde(default)]
+    remove_tags: Vec<String>,
+}
 
 pub(super) async fn handle_set_item_title(
     State(runtime): State<Arc<LanServerRuntime>>,
@@ -118,6 +127,22 @@ pub(super) async fn handle_remove_item_tag(
     let decoded_tag = percent_decode(&tag);
     let res = run_db(&runtime, move |db| db.remove_tag(&id, &decoded_tag)).await?;
     notify_changed(&runtime);
+    Ok(Json(res).into_response())
+}
+
+pub(super) async fn handle_batch_update_entry_tags(
+    State(runtime): State<Arc<LanServerRuntime>>,
+    headers: HeaderMap,
+    Json(body): Json<BatchEntryTagsBody>,
+) -> Result<Response, LanApiError> {
+    require_write_checked(&runtime, &headers)?;
+    let res = run_db(&runtime, move |db| {
+        db.batch_update_entry_tags(&body.entries, &body.add_tags, &body.remove_tags)
+    })
+    .await?;
+    if res.updated_count > 0 {
+        notify_changed(&runtime);
+    }
     Ok(Json(res).into_response())
 }
 

@@ -1109,3 +1109,160 @@ fn test_skip_plain_export_confirm_persistence() {
     assert!(!reopened.set_skip_plain_export_confirm(false).unwrap());
     assert!(!reopened.status().unwrap().skip_plain_export_confirm);
 }
+
+#[test]
+fn test_batch_update_entry_tags_mixed_nfc_and_pruning() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("batch_tags.vault");
+    let mut db = VaultDb::create(&vault_path, "pass-batch", false).unwrap();
+
+    let id1 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 10, 20, 30, 255),
+        Some("img1"),
+    );
+    let id2 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 40, 50, 60, 255),
+        Some("img2"),
+    );
+    let p1 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 70, 80, 90, 255),
+        Some("p1"),
+    );
+    let p2 = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 100, 110, 120, 255),
+        Some("p2"),
+    );
+    let trashed_id = import_id(
+        &mut db,
+        &make_png_bytes(10, 10, 130, 140, 150, 255),
+        Some("trashed"),
+    );
+
+    let group = db
+        .create_group_from_items(&[p1.clone(), p2], Some("grp"), None)
+        .unwrap();
+    db.move_entries_to_trash(&[EntryRef {
+        kind: EntryKind::Image,
+        id: trashed_id.clone(),
+    }])
+    .unwrap();
+
+    db.add_tag(&id1, "Sakura").unwrap();
+    db.add_tag(&id1, "OldTag").unwrap();
+
+    let mixed_refs = vec![
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id1.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id2.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: group.id.clone(),
+        },
+        // Duplicate entry ref should be deduplicated cleanly
+        EntryRef {
+            kind: EntryKind::Image,
+            id: id2.clone(),
+        },
+    ];
+
+    // Add NFD + NFC + existing case-variant tags in one batch
+    let r1 = db
+        .batch_update_entry_tags(
+            &mixed_refs,
+            &["か\u{3099}くえん".to_string(), "sakura".to_string()],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r1.target_count, 3);
+    assert_eq!(r1.updated_count, 3);
+
+    let d1 = db.get_item_detail(&id1).unwrap();
+    let d2 = db.get_item_detail(&id2).unwrap();
+    let dg = db.get_group_detail(&group.id).unwrap();
+    assert!(d1.tags.contains(&"がくえん".to_string()));
+    assert!(d1.tags.contains(&"Sakura".to_string()));
+    assert!(d2.tags.contains(&"がくえん".to_string()));
+    assert!(d2.tags.contains(&"Sakura".to_string()));
+    assert!(dg.tags.contains(&"がくえん".to_string()));
+    assert!(dg.tags.contains(&"Sakura".to_string()));
+
+    // Idempotent re-application with NFC/case variants -> updated_count == 0
+    let r2 = db
+        .batch_update_entry_tags(
+            &mixed_refs,
+            &["がくえん".to_string(), "SAKURA".to_string()],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r2.target_count, 3);
+    assert_eq!(r2.updated_count, 0);
+
+    // Simultaneous add + remove, with add winning on overlap, and orphan pruning on OldTag
+    let r3 = db
+        .batch_update_entry_tags(
+            &mixed_refs,
+            &["OverlapTag".to_string()],
+            &["overlaptag".to_string(), "oldtag".to_string()],
+        )
+        .unwrap();
+    assert_eq!(r3.target_count, 3);
+    assert_eq!(r3.updated_count, 3);
+
+    let d1_after = db.get_item_detail(&id1).unwrap();
+    assert!(!d1_after.tags.contains(&"OldTag".to_string()));
+    assert!(d1_after.tags.contains(&"OverlapTag".to_string()));
+
+    let tags_after = db.list_tags().unwrap();
+    assert!(!tags_after
+        .iter()
+        .any(|t| t.name.eq_ignore_ascii_case("OldTag")));
+    let old_tag_rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM tags WHERE name = 'OldTag' COLLATE NOCASE",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_tag_rows, 0);
+
+    // Trashed item & group member page must be skipped and not create orphan tags
+    let invalid_refs = vec![
+        EntryRef {
+            kind: EntryKind::Image,
+            id: trashed_id,
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: p1,
+        },
+    ];
+    let r4 = db
+        .batch_update_entry_tags(&invalid_refs, &["NeverOrphan".to_string()], &[])
+        .unwrap();
+    assert_eq!(r4.target_count, 0);
+    assert_eq!(r4.updated_count, 0);
+
+    let orphan_rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM tags WHERE name = 'NeverOrphan' COLLATE NOCASE",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_rows, 0);
+
+    // Whitespace-only add_tags returns InvalidInput
+    let err = db.batch_update_entry_tags(&mixed_refs, &["   ".to_string()], &[]);
+    assert!(matches!(err, Err(VaultError::InvalidInput(_))));
+}

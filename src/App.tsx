@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Folder } from "lucide-react";
+import { Folder, Hash } from "lucide-react";
+import { BulkTagDialog } from "./components/BulkTagDialog";
 import { ContextMenu } from "./components/ContextMenu";
 import { GroupEditorDialog } from "./components/GroupEditorDialog";
 import { Inspector } from "./components/Inspector";
@@ -80,6 +81,7 @@ export function App() {
   const [tags, setTags] = useState<TagWithCount[]>([]);
 
   const [lockSettingsOpen, setLockSettingsOpen] = useState(false);
+  const [bulkTagDialogOpen, setBulkTagDialogOpen] = useState(false);
   const [maintenanceModal, setMaintenanceModal] = useState<{
     open: boolean;
     initialTab: MaintenanceTab;
@@ -172,6 +174,7 @@ export function App() {
     refreshLibrary: triggerRefreshLibrary,
     onOpenExportPackageForEntries: handleOpenExportPackageForEntries,
     onPlainExport: requestPlainExport,
+    onOpenBulkTagDialog: () => setBulkTagDialogOpen(true),
     pushToast,
   });
   syncSelectionRef.current = gallery.syncSelectionWithEntries;
@@ -265,6 +268,7 @@ export function App() {
     gallery.clearSelectionState();
     resetPlainExportState();
     setLockSettingsOpen(false);
+    setBulkTagDialogOpen(false);
     setMobileDrawerOpen(false);
     setMobileSelectMode(false);
     importFlow.closeUrlImportDialog();
@@ -284,6 +288,7 @@ export function App() {
 
   readOnlyEnforcedRef.current = () => {
     setMobileSelectMode(false);
+    setBulkTagDialogOpen(false);
     importFlow.closeUrlImportDialog();
     gallery.setEditorGroupId(null);
   };
@@ -346,6 +351,47 @@ export function App() {
     [view, navigateView]
   );
 
+  const applyBatchTagUpdate = useCallback(
+    async (targetEntries: EntryRef[], addTags: string[], removeTags: string[]) => {
+      const report = await vaultApi.batchUpdateEntryTags(targetEntries, addTags, removeTags);
+      if (addTags.length === 1 && removeTags.length === 0) {
+        if (report.updatedCount > 0) {
+          pushToast("success", `「#${addTags[0]}」を ${report.updatedCount}件に付与しました`);
+        } else if (report.targetCount > 0) {
+          pushToast("info", `選択した項目にはすでに「#${addTags[0]}」が付いています`);
+        }
+      } else if (addTags.length === 0 && removeTags.length === 1) {
+        if (report.updatedCount > 0) {
+          pushToast("info", `「#${removeTags[0]}」を ${report.updatedCount}件から外しました`);
+        }
+      } else if (report.updatedCount > 0) {
+        pushToast("success", `${report.updatedCount}件のタグを更新しました`);
+      } else {
+        pushToast("info", "タグに変更はありませんでした");
+      }
+
+      if (gallery.selectedEntryRefs.length === 1) {
+        const singleRef = gallery.selectedEntryRefs[0];
+        if (targetEntries.some((t) => t.kind === singleRef.kind && t.id === singleRef.id)) {
+          if (singleRef.kind === "image") {
+            gallery.setItemDetail(await vaultApi.getItemDetail(singleRef.id));
+          } else {
+            gallery.setGroupDetail(await vaultApi.getGroupDetail(singleRef.id));
+          }
+        }
+      }
+
+      await refreshLibrary();
+    },
+    [
+      gallery.selectedEntryRefs,
+      gallery.setItemDetail,
+      gallery.setGroupDetail,
+      pushToast,
+      refreshLibrary,
+    ]
+  );
+
   const internalDrag = useInternalDrag({
     onDropEntriesToFolder: (refs, folderId) => {
       void vaultApi
@@ -374,6 +420,11 @@ export function App() {
           return refreshLibrary();
         })
         .catch((err) => pushToast("error", formatErrorMessage(err)));
+    },
+    onDropEntriesToTag: (refs, tagName) => {
+      void applyBatchTagUpdate(refs, [tagName], []).catch((err) =>
+        pushToast("error", formatErrorMessage(err))
+      );
     },
     onDropFolderToParent: (folderId, newParentId) => {
       void vaultApi
@@ -653,6 +704,7 @@ export function App() {
             onImportFiles={() => void importFlow.handleImportFiles()}
             onAvifCompleted={() => void refreshLibrary()}
             onCreateGroupFromSelection={() => void gallery.handleCreateGroupFromSelection()}
+            onOpenBulkTagDialog={() => setBulkTagDialogOpen(true)}
             onRemoveSelectionFromFolder={() => {
               if (!currentFolderId || gallery.selectedEntryRefs.length === 0) return;
               void vaultApi
@@ -781,6 +833,12 @@ export function App() {
                   }
                   await refreshLibrary();
                 }}
+                onBatchUpdateTags={(addTags, removeTags) =>
+                  applyBatchTagUpdate(gallery.selectedEntryRefs, addTags, removeTags).catch(
+                    (err) => pushToast("error", formatErrorMessage(err))
+                  )
+                }
+                onOpenBulkTagDialog={() => setBulkTagDialogOpen(true)}
                 onAddToFolder={async (folderId) => {
                   await vaultApi.addEntriesToFolder(folderId, gallery.selectedEntryRefs);
                   if (gallery.selectedEntryRefs.length === 1) {
@@ -1158,6 +1216,14 @@ export function App() {
         onConfirm={plainExport.confirmPendingExport}
       />
 
+      <BulkTagDialog
+        open={bulkTagDialogOpen && canEdit && !isTrashView}
+        entries={gallery.selectedEntriesMeta}
+        allTags={tags}
+        onClose={() => setBulkTagDialogOpen(false)}
+        onApply={applyBatchTagUpdate}
+      />
+
       {internalDrag.activePayload && (
         <div
           className="drag-ghost"
@@ -1166,8 +1232,21 @@ export function App() {
             insetBlockStart: internalDrag.cursor.y + 12,
           }}
         >
-          <Folder size={13} />
-          <span>{internalDrag.activePayload.label}</span>
+          {internalDrag.hoverTarget?.type === "tag" &&
+          internalDrag.activePayload.type === "entries" ? (
+            <>
+              <Hash size={13} />
+              <span>
+                #{internalDrag.hoverTarget.tagName} を付与 (
+                {internalDrag.activePayload.entries.length}件)
+              </span>
+            </>
+          ) : (
+            <>
+              <Folder size={13} />
+              <span>{internalDrag.activePayload.label}</span>
+            </>
+          )}
         </div>
       )}
 

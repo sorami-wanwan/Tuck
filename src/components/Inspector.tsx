@@ -30,6 +30,7 @@ import {
 } from "../types/vault";
 import { formatBytes } from "../utils/format";
 import { formatShortcutLabel } from "../utils/formatShortcut";
+import { isImeComposing, normalizeTagKey, summarizeSelectionTags } from "../utils/bulkTags";
 
 interface InspectorProps {
   mode: "empty" | "image" | "group" | "multi";
@@ -53,6 +54,8 @@ interface InspectorProps {
   onCopyToast?: (message: string) => void;
   onAddTag: (id: string, tagName: string) => Promise<void>;
   onRemoveTag: (id: string, tagName: string) => Promise<void>;
+  onBatchUpdateTags?: (addTags: string[], removeTags: string[]) => Promise<void>;
+  onOpenBulkTagDialog?: () => void;
   onAddToFolder: (folderId: string) => Promise<void>;
   onRemoveFromFolder: (folderId: string) => Promise<void>;
   onOpenLightbox?: (itemId: string) => void;
@@ -99,6 +102,8 @@ export function Inspector(props: InspectorProps) {
     onCopyToast,
     onAddTag,
     onRemoveTag,
+    onBatchUpdateTags,
+    onOpenBulkTagDialog,
     onAddToFolder,
     onRemoveFromFolder,
     onOpenLightbox,
@@ -120,6 +125,9 @@ export function Inspector(props: InspectorProps) {
   const [sourceUrlDraft, setSourceUrlDraft] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [tagInputOpen, setTagInputOpen] = useState(false);
+  const [multiTagDraft, setMultiTagDraft] = useState("");
+  const [multiTagFocused, setMultiTagFocused] = useState(false);
+  const [multiTagBusy, setMultiTagBusy] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const confirmDialogRef = useRef<HTMLDialogElement>(null);
@@ -137,6 +145,11 @@ export function Inspector(props: InspectorProps) {
       memoTimerRef.current = null;
     }
   }, [activeId]);
+
+  useEffect(() => {
+    setMultiTagDraft("");
+    setMultiTagFocused(false);
+  }, [mode]);
 
   useEffect(() => {
     if (activeEntity) {
@@ -203,6 +216,38 @@ export function Inspector(props: InspectorProps) {
       .slice(0, 8);
   }, [activeEntity, allTags, tagDraft, tagInputOpen]);
 
+  const multiTagSummary = useMemo(
+    () => (mode === "multi" ? summarizeSelectionTags(selectedEntriesMeta ?? []) : []),
+    [mode, selectedEntriesMeta]
+  );
+
+  const multiSuggestions = useMemo(() => {
+    if (mode !== "multi" || !multiTagFocused) return [];
+    const allAttached = new Set(
+      multiTagSummary.filter((s) => s.state === "all").map((s) => s.key)
+    );
+    const q = normalizeTagKey(multiTagDraft);
+    return allTags
+      .filter((t) => !allAttached.has(normalizeTagKey(t.name)))
+      .filter((t) => (q ? t.name.toLowerCase().includes(q) : true))
+      .slice(0, 8);
+  }, [mode, multiTagFocused, multiTagSummary, allTags, multiTagDraft]);
+
+  const runMultiTagUpdate = async (
+    addTags: string[],
+    removeTags: string[],
+    clearDraft = false
+  ) => {
+    if (!onBatchUpdateTags || multiTagBusy) return;
+    setMultiTagBusy(true);
+    try {
+      await onBatchUpdateTags(addTags, removeTags);
+      if (clearDraft) setMultiTagDraft("");
+    } finally {
+      setMultiTagBusy(false);
+    }
+  };
+
   const standaloneImageCount = selectedEntriesMeta
     ? selectedEntriesMeta.filter((e) => e.kind === "image" && !isVideoMime(e.coverMimeType)).length
     : selectedEntries.filter((e) => e.kind === "image").length;
@@ -246,6 +291,132 @@ export function Inspector(props: InspectorProps) {
           </div>
 
           {!readOnly && !inTrash && standaloneSelectedActions()}
+
+          <div className="inspector-field-group">
+            <div className="inspector-section-header">
+              <span className="section-label">タグ</span>
+              {!readOnly && !inTrash && onOpenBulkTagDialog && (
+                <button
+                  type="button"
+                  className="inspector-inline-link"
+                  onClick={onOpenBulkTagDialog}
+                >
+                  まとめて編集...
+                </button>
+              )}
+            </div>
+            <div className="tag-chips-wrap">
+              {multiTagSummary.length === 0 && (readOnly || inTrash) && (
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>タグなし</span>
+              )}
+              {multiTagSummary.map((tag) =>
+                tag.state === "all" ? (
+                  <span key={tag.key} className="tag-chip">
+                    <span>{tag.name}</span>
+                    {!readOnly && !inTrash && onBatchUpdateTags && (
+                      <button
+                        type="button"
+                        className="tag-chip-remove"
+                        disabled={multiTagBusy}
+                        title={`${tag.name} を全項目から削除`}
+                        aria-label={`${tag.name} を全項目から削除`}
+                        onClick={() => void runMultiTagUpdate([], [tag.name])}
+                      >
+                        <X size={11} />
+                      </button>
+                    )}
+                  </span>
+                ) : (
+                  <span
+                    key={tag.key}
+                    className="tag-chip tag-chip-partial"
+                    title={`${tag.total}件中 ${tag.count}件に付与中`}
+                  >
+                    <span>{tag.name}</span>
+                    <span className="tag-chip-ratio tabular-nums">
+                      {tag.count}/{tag.total}
+                    </span>
+                    {!readOnly && !inTrash && onBatchUpdateTags && (
+                      <>
+                        <button
+                          type="button"
+                          className="tag-chip-apply"
+                          disabled={multiTagBusy}
+                          title="全項目に揃える"
+                          aria-label={`${tag.name} を全項目に揃える`}
+                          onClick={() => void runMultiTagUpdate([tag.name], [])}
+                        >
+                          <Plus size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className="tag-chip-remove"
+                          disabled={multiTagBusy}
+                          title="全項目から外す"
+                          aria-label={`${tag.name} を全項目から削除`}
+                          onClick={() => void runMultiTagUpdate([], [tag.name])}
+                        >
+                          <X size={11} />
+                        </button>
+                      </>
+                    )}
+                  </span>
+                )
+              )}
+            </div>
+
+            {!readOnly && !inTrash && onBatchUpdateTags && (
+              <div
+                className="tag-autocomplete"
+                onBlur={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    setMultiTagFocused(false);
+                  }
+                }}
+              >
+                <input
+                  type="text"
+                  className="inspector-input"
+                  aria-label="選択中の全項目にタグを追加"
+                  placeholder={`全 ${selectedEntries.length}件にタグを追加...`}
+                  value={multiTagDraft}
+                  disabled={multiTagBusy}
+                  onFocus={() => setMultiTagFocused(true)}
+                  onChange={(e) => setMultiTagDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (isImeComposing(e)) return;
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const trimmed = multiTagDraft.normalize("NFC").trim();
+                      if (trimmed) {
+                        void runMultiTagUpdate([trimmed], [], true);
+                      }
+                    } else if (e.key === "Escape") {
+                      setMultiTagDraft("");
+                      setMultiTagFocused(false);
+                      e.currentTarget.blur();
+                    }
+                  }}
+                />
+                {multiSuggestions.length > 0 && (
+                  <div className="tag-suggestions" role="listbox" aria-label="既存タグ候補">
+                    {multiSuggestions.map((sug) => (
+                      <button
+                        key={sug.id}
+                        type="button"
+                        className="tag-suggestion-btn"
+                        disabled={multiTagBusy}
+                        onClick={() => void runMultiTagUpdate([sug.name], [], true)}
+                      >
+                        <span>{sug.name}</span>
+                        <span className="nav-item-count tabular-nums">{sug.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {!readOnly && !inTrash && allFolders.length > 0 && (
             <div className="inspector-field-group">
@@ -421,7 +592,7 @@ export function Inspector(props: InspectorProps) {
           ) : (
             <>
               <div>・Cmd/Ctrl + クリック：複数選択</div>
-              <div>・フォルダへドラッグ：フォルダに追加</div>
+              <div>・フォルダ / タグへドラッグ：追加・タグ付け</div>
               <div>・{formatShortcutLabel(status.lockSettings.shortcut)}：即時ロック</div>
               <div>・Cmd/Ctrl + V：クリップボードから取り込み</div>
             </>
@@ -480,6 +651,7 @@ export function Inspector(props: InspectorProps) {
   };
 
   const handleTagKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (isImeComposing(e)) return;
     if (e.key === "Enter") {
       e.preventDefault();
       handleTagSubmit(tagDraft);

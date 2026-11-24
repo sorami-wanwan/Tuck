@@ -370,6 +370,7 @@ pub fn run() {
             commands::set_item_source_url,
             commands::add_item_tag,
             commands::remove_item_tag,
+            commands::batch_update_entry_tags,
             commands::list_tags,
             commands::list_folders,
             commands::create_folder,

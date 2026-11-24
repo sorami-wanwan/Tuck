@@ -48,9 +48,9 @@ use handlers_read::{
 };
 use handlers_write::{
     handle_add_entries_to_folder, handle_add_group_tag, handle_add_item_tag,
-    handle_add_items_to_group, handle_cancel_url_import, handle_check_ytdlp_status,
-    handle_create_folder, handle_create_group, handle_delete_folder, handle_import_bytes,
-    handle_import_url, handle_move_folder, handle_remove_entries_from_folder,
+    handle_add_items_to_group, handle_batch_update_entry_tags, handle_cancel_url_import,
+    handle_check_ytdlp_status, handle_create_folder, handle_create_group, handle_delete_folder,
+    handle_import_bytes, handle_import_url, handle_move_folder, handle_remove_entries_from_folder,
     handle_remove_group_tag, handle_remove_item_tag, handle_remove_page_from_group,
     handle_rename_folder, handle_reorder_group_pages, handle_save_item_thumbnail,
     handle_set_group_memo, handle_set_group_rating, handle_set_group_reader_prefs,
@@ -769,6 +769,10 @@ fn build_router(runtime: Arc<LanServerRuntime>) -> Router {
         )
         .route("/api/items/{id}/tags", post(handle_add_item_tag))
         .route("/api/items/{id}/tags/{tag}", delete(handle_remove_item_tag))
+        .route(
+            "/api/entries/tags/batch",
+            post(handle_batch_update_entry_tags),
+        )
         .route(
             "/api/items/{id}/thumbnail",
             post(handle_save_item_thumbnail).layer(DefaultBodyLimit::disable()),

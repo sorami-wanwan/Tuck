@@ -221,4 +221,9 @@
   .thumb-expand-btn {
     display: none;
   }
+
+  .bulk-tag-dialog .inspector-input {
+    font-size: 16px;
+    min-block-size: 40px;
+  }
 }

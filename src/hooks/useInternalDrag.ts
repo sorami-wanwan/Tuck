@@ -10,12 +10,14 @@ export type DropTarget =
   | { type: "folderRoot" }
   | { type: "trash" }
   | { type: "group"; groupId: string }
+  | { type: "tag"; tagName: string }
   | null;
 
 interface UseInternalDragOptions {
   onDropEntriesToFolder: (entries: EntryRef[], folderId: string) => void;
   onDropEntriesToTrash: (entries: EntryRef[]) => void;
   onDropImagesToGroup: (itemIds: string[], groupId: string) => void;
+  onDropEntriesToTag: (entries: EntryRef[], tagName: string) => void;
   onDropFolderToParent: (folderId: string, newParentId: string | null) => void;
 }
 
@@ -42,6 +44,10 @@ function hitTestDropTarget(x: number, y: number, payload: DragPayload): DropTarg
       if (hasStandaloneImage) {
         return { type: "group", groupId };
       }
+    }
+    const tagName = el.dataset.dropTagName;
+    if (tagName && payload.type === "entries") {
+      return { type: "tag", tagName };
     }
   }
   return null;
@@ -111,6 +117,8 @@ export function useInternalDrag(options: UseInternalDragOptions) {
             if (imgIds.length > 0) {
               opts.onDropImagesToGroup(imgIds, target.groupId);
             }
+          } else if (target.type === "tag") {
+            opts.onDropEntriesToTag(p.payload.entries, target.tagName);
           }
         } else if (target && p.payload.type === "folder") {
           if (target.type === "folder") {

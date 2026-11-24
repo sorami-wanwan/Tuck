@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BackupReport,
+  BatchTagReport,
   EntryRef,
   FolderNode,
   GalleryEntry,
@@ -391,6 +392,21 @@ export const vaultApi = {
       `/api/items/${encodeURIComponent(itemId)}/tags/${encodeURIComponent(tagName)}`,
       "DELETE"
     );
+  },
+
+  batchUpdateEntryTags(
+    entries: EntryRef[],
+    addTags: string[],
+    removeTags: string[] = []
+  ): Promise<BatchTagReport> {
+    if (isTauriRuntime()) {
+      return invoke("batch_update_entry_tags", { entries, addTags, removeTags });
+    }
+    return webJson<BatchTagReport>("/api/entries/tags/batch", "POST", {
+      entries,
+      addTags,
+      removeTags,
+    });
   },
 
   listTags(): Promise<TagWithCount[]> {

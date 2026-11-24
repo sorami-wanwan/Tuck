@@ -903,3 +903,213 @@ fn test_interface_priority_prefers_wifi_across_oses() {
     assert_eq!(linux_wifi.1, 0);
     assert_eq!(win_wifi.1, 0);
 }
+
+#[tokio::test]
+async fn test_lan_server_batch_entry_tags_rbac_and_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("lan_batch_tags.vault");
+    let mut db = VaultDb::create(&vault_path, "vault-pass-tag", true).unwrap();
+
+    let png1 = minimal_png_bytes();
+    let mut png2 = minimal_png_bytes();
+    png2.push(0); // distinct sha256 while still valid PNG bytes
+    let mut png3 = minimal_png_bytes();
+    png3.extend_from_slice(&[1, 2]);
+
+    let img_id = match db.import_bytes(&png1, Some("standalone")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected image"),
+    };
+    let p1 = match db.import_bytes(&png2, Some("p1")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p1"),
+    };
+    let p2 = match db.import_bytes(&png3, Some("p2")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p2"),
+    };
+    let grp = db
+        .create_group_from_items(&[p1, p2], Some("comic"), None)
+        .unwrap();
+
+    let state = AppState::default();
+    {
+        let mut g = state.lock_db().unwrap();
+        *g = Some(db);
+    }
+
+    let dist_dir = dir.path().join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+    fs::write(
+        dist_dir.join("index.html"),
+        "<html><body>Tuck</body></html>",
+    )
+    .unwrap();
+
+    let (handle, status) = start_lan_server_on_addr(
+        state.clone(),
+        StartLanShareRequest {
+            mode: LanAccessMode::ReadOnly,
+            duration_minutes: 30,
+            bind_ip: None,
+            pause_idle_lock: true,
+        },
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "127.0.0.1".to_string(),
+        vec![],
+        AssetSource::Dir(dist_dir),
+        LanHostNotifier::default(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut g = state.lan_server.lock().unwrap();
+        *g = Some(handle.clone());
+    }
+
+    let port = status.port;
+    let payload = serde_json::json!({
+        "entries": [
+            { "kind": "image", "id": img_id },
+            { "kind": "group", "id": grp.id }
+        ],
+        "addTags": ["風景", "お気に入り"],
+        "removeTags": []
+    })
+    .to_string();
+
+    // 1. Unauthenticated -> 401
+    let unauth = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/tags/batch",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(unauth.status, 401);
+
+    // Login with PIN
+    let pin_body = format!(r#"{{"pin":"{}"}}"#, status.pin);
+    let pin_ok = send_raw_http(
+        port,
+        "POST",
+        "/api/auth/pin",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        pin_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(pin_ok.status, 200);
+    let cookie = pin_ok
+        .headers
+        .get("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // 2. ReadOnly mode -> 403
+    let ro_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/tags/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(ro_res.status, 403);
+
+    // Switch to ReadWrite
+    handle.set_mode(LanAccessMode::ReadWrite);
+
+    // 3. Missing X-Tuck-Client header -> 403
+    let no_csrf = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/tags/batch",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(no_csrf.status, 403);
+
+    // 4. ReadWrite + Cookie + CSRF -> 200
+    let ok_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/tags/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(ok_res.status, 200);
+    let report: serde_json::Value = serde_json::from_slice(&ok_res.body).unwrap();
+    assert_eq!(report["targetCount"], 2);
+    assert_eq!(report["updatedCount"], 2);
+
+    // Verify via GET /api/tags and DB details
+    let tags_res = send_raw_http(port, "GET", "/api/tags", &[("Cookie", &cookie)], b"").await;
+    assert_eq!(tags_res.status, 200);
+    let tags_json: Vec<serde_json::Value> = serde_json::from_slice(&tags_res.body).unwrap();
+    assert_eq!(tags_json.len(), 2);
+    assert!(tags_json.iter().all(|t| t["count"] == 2));
+
+    {
+        let g = state.lock_db().unwrap();
+        let db_ref = g.as_ref().unwrap();
+        let item_detail = db_ref.get_item_detail(&img_id).unwrap();
+        let grp_detail = db_ref.get_group_detail(&grp.id).unwrap();
+        assert_eq!(item_detail.tags, vec!["お気に入り", "風景"]);
+        assert_eq!(grp_detail.tags, vec!["お気に入り", "風景"]);
+    }
+
+    // 5. Remove one tag and verify orphan pruning via GET /api/tags
+    let remove_payload = serde_json::json!({
+        "entries": [
+            { "kind": "image", "id": img_id },
+            { "kind": "group", "id": grp.id }
+        ],
+        "addTags": [],
+        "removeTags": ["風景"]
+    })
+    .to_string();
+    let rem_res = send_raw_http(
+        port,
+        "POST",
+        "/api/entries/tags/batch",
+        &[
+            ("Cookie", &cookie),
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        remove_payload.as_bytes(),
+    )
+    .await;
+    assert_eq!(rem_res.status, 200);
+    let rem_report: serde_json::Value = serde_json::from_slice(&rem_res.body).unwrap();
+    assert_eq!(rem_report["targetCount"], 2);
+    assert_eq!(rem_report["updatedCount"], 2);
+
+    let tags_after = send_raw_http(port, "GET", "/api/tags", &[("Cookie", &cookie)], b"").await;
+    assert_eq!(tags_after.status, 200);
+    let tags_after_json: Vec<serde_json::Value> = serde_json::from_slice(&tags_after.body).unwrap();
+    assert_eq!(tags_after_json.len(), 1);
+    assert_eq!(tags_after_json[0]["name"], "お気に入り");
+
+    handle.stop("test_done");
+}

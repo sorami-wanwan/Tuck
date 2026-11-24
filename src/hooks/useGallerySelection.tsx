@@ -18,6 +18,7 @@ import {
   Maximize2,
   Play,
   RotateCcw,
+  Tags,
   Trash2,
   Unlink,
 } from "lucide-react";
@@ -49,6 +50,7 @@ interface UseGallerySelectionOptions {
   refreshLibrary: () => Promise<void>;
   onOpenExportPackageForEntries: (entries: EntryRef[]) => void;
   onPlainExport: (target: PlainExportTarget) => void;
+  onOpenBulkTagDialog: () => void;
   pushToast: (tone: ToastItem["tone"], message: string) => void;
 }
 
@@ -67,6 +69,7 @@ export function useGallerySelection({
   refreshLibrary,
   onOpenExportPackageForEntries,
   onPlainExport,
+  onOpenBulkTagDialog,
   pushToast,
 }: UseGallerySelectionOptions) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
@@ -469,6 +472,13 @@ export function useGallerySelection({
             })),
     });
 
+    itemsList.push({
+      id: "edit-tags",
+      label: selectedEntryRefs.length >= 2 ? "タグを一括編集..." : "タグを編集...",
+      icon: <Tags size={13} />,
+      onClick: onOpenBulkTagDialog,
+    });
+
     if (standaloneSelectedCount >= 2) {
       itemsList.push({
         id: "bundle",
@@ -566,6 +576,7 @@ export function useGallerySelection({
     requestPermanentDelete,
     onOpenExportPackageForEntries,
     onPlainExport,
+    onOpenBulkTagDialog,
   ]);
 
   return {

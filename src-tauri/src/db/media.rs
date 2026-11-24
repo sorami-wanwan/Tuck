@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -10,7 +11,7 @@ use crate::error::VaultError;
 use crate::imaging::{
     detect_mime, is_video_mime, process_client_png_thumbnail, process_image_bytes,
 };
-use crate::models::{ItemDetail, TagWithCount};
+use crate::models::{BatchTagReport, EntryKind, EntryRef, ItemDetail, TagWithCount};
 
 use super::schema::{BLOB_CHUNK_SIZE, CHUNK_STORAGE_THRESHOLD};
 use super::{
@@ -622,6 +623,174 @@ impl VaultDb {
         tx.commit()?;
 
         self.get_item_detail(item_id)
+    }
+
+    pub fn batch_update_entry_tags(
+        &mut self,
+        entries: &[EntryRef],
+        add_tags: &[String],
+        remove_tags: &[String],
+    ) -> Result<BatchTagReport, VaultError> {
+        let mut normalized_add: Vec<String> = Vec::new();
+        let mut add_keys: HashSet<String> = HashSet::new();
+        for raw in add_tags {
+            let norm = normalize_nfc_trimmed(raw);
+            if !norm.is_empty() && add_keys.insert(norm.to_lowercase()) {
+                normalized_add.push(norm);
+            }
+        }
+
+        let mut normalized_remove: Vec<String> = Vec::new();
+        let mut remove_keys: HashSet<String> = HashSet::new();
+        for raw in remove_tags {
+            let norm = normalize_nfc_trimmed(raw);
+            if norm.is_empty() {
+                continue;
+            }
+            let key = norm.to_lowercase();
+            if !add_keys.contains(&key) && remove_keys.insert(key) {
+                normalized_remove.push(norm);
+            }
+        }
+
+        if !add_tags.is_empty() && normalized_add.is_empty() && normalized_remove.is_empty() {
+            return Err(VaultError::InvalidInput(
+                "タグ名を入力してください".to_string(),
+            ));
+        }
+
+        if entries.is_empty() || (normalized_add.is_empty() && normalized_remove.is_empty()) {
+            return Ok(BatchTagReport {
+                target_count: 0,
+                updated_count: 0,
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut seen_items: HashSet<String> = HashSet::new();
+        let mut seen_groups: HashSet<String> = HashSet::new();
+        let mut valid_item_ids: Vec<String> = Vec::new();
+        let mut valid_group_ids: Vec<String> = Vec::new();
+
+        for entry in entries {
+            match entry.kind {
+                EntryKind::Image => {
+                    if !seen_items.insert(entry.id.clone()) {
+                        continue;
+                    }
+                    let active: Option<String> = tx
+                        .query_row(
+                            "SELECT id FROM items
+                             WHERE id = ?1
+                               AND deleted_at IS NULL
+                               AND NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = items.id)",
+                            params![entry.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(id) = active {
+                        valid_item_ids.push(id);
+                    }
+                }
+                EntryKind::Group => {
+                    if !seen_groups.insert(entry.id.clone()) {
+                        continue;
+                    }
+                    let active: Option<String> = tx
+                        .query_row(
+                            "SELECT id FROM groups WHERE id = ?1 AND deleted_at IS NULL",
+                            params![entry.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(id) = active {
+                        valid_group_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        let target_count = valid_item_ids.len() + valid_group_ids.len();
+        if target_count == 0 {
+            return Ok(BatchTagReport {
+                target_count: 0,
+                updated_count: 0,
+            });
+        }
+
+        let mut touched_items: HashSet<String> = HashSet::new();
+        let mut touched_groups: HashSet<String> = HashSet::new();
+
+        for tag_name in &normalized_remove {
+            for item_id in &valid_item_ids {
+                let affected = tx.execute(
+                    "DELETE FROM item_tags
+                     WHERE item_id = ?1
+                       AND tag_id IN (SELECT id FROM tags WHERE name = ?2 COLLATE NOCASE)",
+                    params![item_id, tag_name],
+                )?;
+                if affected > 0 {
+                    touched_items.insert(item_id.clone());
+                }
+            }
+            for group_id in &valid_group_ids {
+                let affected = tx.execute(
+                    "DELETE FROM group_tags
+                     WHERE group_id = ?1
+                       AND tag_id IN (SELECT id FROM tags WHERE name = ?2 COLLATE NOCASE)",
+                    params![group_id, tag_name],
+                )?;
+                if affected > 0 {
+                    touched_groups.insert(group_id.clone());
+                }
+            }
+        }
+
+        for tag_name in &normalized_add {
+            let tag_id = upsert_tag(&tx, tag_name)?;
+            for item_id in &valid_item_ids {
+                let affected = tx.execute(
+                    "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?1, ?2)",
+                    params![item_id, tag_id],
+                )?;
+                if affected > 0 {
+                    touched_items.insert(item_id.clone());
+                }
+            }
+            for group_id in &valid_group_ids {
+                let affected = tx.execute(
+                    "INSERT OR IGNORE INTO group_tags (group_id, tag_id) VALUES (?1, ?2)",
+                    params![group_id, tag_id],
+                )?;
+                if affected > 0 {
+                    touched_groups.insert(group_id.clone());
+                }
+            }
+        }
+
+        if !normalized_remove.is_empty() {
+            prune_orphan_tags(&tx)?;
+        }
+
+        let now = now_ms();
+        for item_id in &touched_items {
+            tx.execute(
+                "UPDATE items SET updated_at = ?2 WHERE id = ?1",
+                params![item_id, now],
+            )?;
+        }
+        for group_id in &touched_groups {
+            tx.execute(
+                "UPDATE groups SET updated_at = ?2 WHERE id = ?1",
+                params![group_id, now],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(BatchTagReport {
+            target_count,
+            updated_count: touched_items.len() + touched_groups.len(),
+        })
     }
 
     pub fn list_tags(&self) -> Result<Vec<TagWithCount>, VaultError> {

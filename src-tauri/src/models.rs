@@ -211,6 +211,13 @@ pub struct TagWithCount {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTagReport {
+    pub target_count: usize,
+    pub updated_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SortBy {
