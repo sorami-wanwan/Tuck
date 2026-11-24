@@ -196,7 +196,8 @@
   .reader-scrubber,
   .star-btn,
   .star-clear-btn,
-  .page-editor-card {
+  .page-editor-card,
+  .media-filter-btn {
     transition: none;
   }
 }
@@ -214,6 +215,12 @@
   .mode-pill-btn {
     min-inline-size: var(--target-size);
     min-block-size: var(--target-size);
+  }
+
+  .media-filter-btn {
+    min-block-size: var(--target-size);
+    padding-inline: 12px;
+    font-size: 12px;
   }
 
   .page-drag-handle {

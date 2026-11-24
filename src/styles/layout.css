@@ -273,6 +273,74 @@
   flex-shrink: 0;
 }
 
+.toolbar-media-filter {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-inline-size: 0;
+}
+
+.media-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.media-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .media-filter-btn {
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+}
+
+@media (hover: hover) {
+  .media-filter-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+}
+
+.media-filter-btn[aria-pressed="true"] {
+  background: var(--accent-blue-soft);
+  border-color: rgba(76, 141, 255, 0.45);
+  color: var(--text-primary);
+}
+
+.media-filter-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
+@media (forced-colors: active) {
+  .media-filter-btn[aria-pressed="true"] {
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+}
+
 .toolbar-center {
   display: flex;
   align-items: center;
@@ -374,10 +442,31 @@
   color: var(--text-muted);
 }
 
+@container toolbar (max-width: 860px) {
+  .toolbar {
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    row-gap: 6px;
+    column-gap: 8px;
+  }
+
+  .toolbar-media-filter {
+    order: 4;
+    flex: 1 0 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .toolbar-media-filter::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @container toolbar (max-width: 740px) {
   .toolbar {
     gap: 8px;
-    padding: 0 10px;
+    padding-inline: 10px;
   }
 
   .toolbar-right .toolbar-select {
@@ -394,17 +483,20 @@
   }
 
   .toolbar-left {
+    order: 1;
     flex: 1 1 150px;
     min-inline-size: 0;
   }
 
   .toolbar-center {
+    order: 2;
     margin-inline: 0;
     inline-size: 108px;
     min-inline-size: 72px;
   }
 
   .toolbar-right {
+    order: 3;
     flex: 1 0 100%;
     justify-content: flex-start;
   }

@@ -1,8 +1,12 @@
+import { type KeyboardEvent, type ReactNode } from "react";
 import {
+  BookOpen,
   CheckSquare,
   ChevronLeft,
   ChevronRight,
   Download,
+  Film,
+  Image as ImageIcon,
   LayoutGrid,
   Menu,
   PanelRight,
@@ -11,7 +15,8 @@ import {
   Square,
   X,
 } from "lucide-react";
-import type { FolderNode, SortBy, ThumbFitMode, ViewSelection } from "../types/vault";
+import type { FolderNode, MediaFilter, SortBy, ThumbFitMode, ViewSelection } from "../types/vault";
+import { getVisibleMimeFilters, MEDIA_FILTER_OPTIONS } from "../utils/mediaFilter";
 
 interface ToolbarProps {
   view: ViewSelection;
@@ -29,6 +34,8 @@ interface ToolbarProps {
   onSortByChange: (sortBy: SortBy) => void;
   searchText: string;
   onSearchTextChange: (text: string) => void;
+  mediaType: MediaFilter;
+  onMediaTypeChange: (mediaType: MediaFilter) => void;
   filterOpen: boolean;
   onToggleFilterOpen: () => void;
   minRating: number | null;
@@ -49,16 +56,12 @@ interface ToolbarProps {
   onPlainExportFolder?: (folderId: string) => void;
 }
 
-const MIME_FILTERS: Array<{ label: string; mime: string }> = [
-  { label: "PNG", mime: "image/png" },
-  { label: "JPEG", mime: "image/jpeg" },
-  { label: "WebP", mime: "image/webp" },
-  { label: "GIF", mime: "image/gif" },
-  { label: "AVIF", mime: "image/avif" },
-  { label: "MP4", mime: "video/mp4" },
-  { label: "WebM", mime: "video/webm" },
-  { label: "MOV", mime: "video/quicktime" },
-];
+const MEDIA_FILTER_ICONS: Record<MediaFilter, ReactNode> = {
+  all: null,
+  image: <ImageIcon size={13} aria-hidden="true" />,
+  video: <Film size={13} aria-hidden="true" />,
+  manga: <BookOpen size={13} aria-hidden="true" />,
+};
 
 function viewTitle(view: ViewSelection, folders: FolderNode[]): string {
   switch (view.kind) {
@@ -94,6 +97,8 @@ export function Toolbar(props: ToolbarProps) {
     onSortByChange,
     searchText,
     onSearchTextChange,
+    mediaType,
+    onMediaTypeChange,
     filterOpen,
     onToggleFilterOpen,
     minRating,
@@ -115,12 +120,42 @@ export function Toolbar(props: ToolbarProps) {
   } = props;
 
   const hasActiveConditions =
+    mediaType !== "all" ||
     minRating !== null ||
     mimeTypes.length > 0 ||
     searchText.trim().length > 0 ||
     view.kind !== "all";
 
   const hasExtraFilter = minRating !== null || mimeTypes.length > 0;
+  const visibleMimeFilters = getVisibleMimeFilters(mediaType);
+
+  const handleMediaFilterKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const buttons = Array.from(
+      e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")
+    );
+    if (buttons.length === 0) return;
+
+    const currentIdx = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const rtl = getComputedStyle(e.currentTarget).direction === "rtl";
+    let nextIdx: number | null = null;
+
+    if (e.key === "ArrowRight") {
+      const step = rtl ? -1 : 1;
+      nextIdx = currentIdx < 0 ? 0 : (currentIdx + step + buttons.length) % buttons.length;
+    } else if (e.key === "ArrowLeft") {
+      const step = rtl ? 1 : -1;
+      nextIdx = currentIdx < 0 ? 0 : (currentIdx + step + buttons.length) % buttons.length;
+    } else if (e.key === "Home") {
+      nextIdx = 0;
+    } else if (e.key === "End") {
+      nextIdx = buttons.length - 1;
+    }
+
+    if (nextIdx !== null) {
+      e.preventDefault();
+      buttons[nextIdx]?.focus();
+    }
+  };
 
   return (
     <header className="toolbar-header">
@@ -177,6 +212,31 @@ export function Toolbar(props: ToolbarProps) {
               <Download size={14} />
             </button>
           )}
+        </div>
+
+        <div className="toolbar-media-filter">
+          <div
+            className="media-filter-group"
+            role="group"
+            aria-label="メディア種別フィルター"
+            onKeyDown={handleMediaFilterKeyDown}
+          >
+            {MEDIA_FILTER_OPTIONS.map((opt) => {
+              const active = mediaType === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className="media-filter-btn"
+                  aria-pressed={active}
+                  onClick={() => onMediaTypeChange(opt.value)}
+                >
+                  {MEDIA_FILTER_ICONS[opt.value]}
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="toolbar-center">
@@ -302,7 +362,7 @@ export function Toolbar(props: ToolbarProps) {
 
           <div className="filter-group">
             <span className="filter-group-label">形式</span>
-            {MIME_FILTERS.map((item) => {
+            {visibleMimeFilters.map((item) => {
               const active = mimeTypes.includes(item.mime);
               return (
                 <button

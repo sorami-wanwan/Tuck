@@ -3,6 +3,7 @@ use crate::models::*;
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use rusqlite::params;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use tempfile::TempDir;
@@ -1495,4 +1496,247 @@ fn test_monotonic_import_created_at_and_group_page_created_at() {
     );
     let d5 = reopened.get_item_detail(&id5).unwrap().created_at;
     assert!(d5 > t3);
+}
+
+#[test]
+fn test_query_entries_media_type_filter_and_combinations() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("media_filter.vault");
+    let mut db = VaultDb::create(&vault_path, "pass1234", false).unwrap();
+
+    // Standalone images (PNG, JPEG, AVIF)
+    let png_id = import_id(
+        &mut db,
+        &make_png_bytes(64, 64, 10, 40, 90, 255),
+        Some("単体PNG"),
+    );
+    let jpg_id = import_id(
+        &mut db,
+        &make_jpeg_bytes(64, 64, 120, 30, 80),
+        Some("単体JPEG"),
+    );
+    let avif_id = import_id(&mut db, &make_minimal_avif_bytes(), Some("単体AVIF"));
+
+    // Videos (MP4, WebM, MOV)
+    let mp4_id = import_id(
+        &mut db,
+        &make_minimal_mp4_bytes(b"VID_MP4"),
+        Some("動画MP4"),
+    );
+    let webm_id = import_id(&mut db, &make_minimal_webm_bytes(), Some("動画WebM"));
+    let mov_id = import_id(&mut db, &make_minimal_mov_bytes(), Some("動画MOV"));
+
+    // Manga group (PNG + JPEG pages distinct from standalone items)
+    let page1_id = import_id(
+        &mut db,
+        &make_png_bytes(80, 100, 200, 150, 50, 255),
+        Some("漫画p1"),
+    );
+    let page2_id = import_id(
+        &mut db,
+        &make_jpeg_bytes(80, 100, 50, 200, 150),
+        Some("漫画p2"),
+    );
+    let group = db
+        .create_group_from_items(&[page1_id, page2_id], Some("漫画シリーズ"), None)
+        .unwrap();
+
+    // 1. Default / All returns 7 entries (6 standalone + 1 group)
+    let all_entries = db.query_entries(&SearchQuery::default()).unwrap();
+    assert_eq!(all_entries.len(), 7);
+
+    // 2. MediaFilter::Image returns only the 3 standalone images
+    let image_entries = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Image,
+            ..Default::default()
+        })
+        .unwrap();
+    let image_ids: HashSet<&str> = image_entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(image_entries.len(), 3);
+    assert!(image_ids.contains(png_id.as_str()));
+    assert!(image_ids.contains(jpg_id.as_str()));
+    assert!(image_ids.contains(avif_id.as_str()));
+    assert!(!image_ids.contains(group.id.as_str()));
+
+    // 3. MediaFilter::Video returns only the 3 videos
+    let video_entries = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Video,
+            ..Default::default()
+        })
+        .unwrap();
+    let video_ids: HashSet<&str> = video_entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(video_entries.len(), 3);
+    assert!(video_ids.contains(mp4_id.as_str()));
+    assert!(video_ids.contains(webm_id.as_str()));
+    assert!(video_ids.contains(mov_id.as_str()));
+
+    // 4. MediaFilter::Manga returns only the manga group
+    let manga_entries = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Manga,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(manga_entries.len(), 1);
+    assert_eq!(manga_entries[0].kind, EntryKind::Group);
+    assert_eq!(manga_entries[0].id, group.id);
+
+    // 5. Image + mime image/png returns standalone PNG only (excludes manga group with PNG page)
+    let png_only = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Image,
+            mime_types: vec!["image/png".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(png_only.len(), 1);
+    assert_eq!(png_only[0].id, png_id);
+
+    // 6. Manga + mime image/png returns the manga group containing PNG page
+    let manga_png = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Manga,
+            mime_types: vec!["image/png".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(manga_png.len(), 1);
+    assert_eq!(manga_png[0].id, group.id);
+
+    // 7. Video + mime video/mp4 returns MP4 only
+    let mp4_only = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Video,
+            mime_types: vec!["video/mp4".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(mp4_only.len(), 1);
+    assert_eq!(mp4_only[0].id, mp4_id);
+
+    // 8. Contradictory combinations return empty results
+    let video_with_png_mime = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Video,
+            mime_types: vec!["image/png".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(video_with_png_mime.is_empty());
+
+    let manga_with_mp4_mime = db
+        .query_entries(&SearchQuery {
+            media_type: MediaFilter::Manga,
+            mime_types: vec!["video/mp4".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(manga_with_mp4_mime.is_empty());
+
+    // 9. Combine media_type with folder, tags, rating, text, and trash scope
+    let folder = db.create_folder(None, "コレクション", "").unwrap();
+    db.add_entries_to_folder(
+        &folder.id,
+        &[
+            EntryRef {
+                kind: EntryKind::Image,
+                id: png_id.clone(),
+            },
+            EntryRef {
+                kind: EntryKind::Image,
+                id: mp4_id.clone(),
+            },
+            EntryRef {
+                kind: EntryKind::Group,
+                id: group.id.clone(),
+            },
+        ],
+    )
+    .unwrap();
+
+    db.add_tag(&png_id, "特選").unwrap();
+    db.add_tag(&mp4_id, "特選").unwrap();
+    db.add_group_tag(&group.id, "特選").unwrap();
+    db.set_rating(&png_id, 5).unwrap();
+    db.set_rating(&mp4_id, 4).unwrap();
+    db.set_group_rating(&group.id, 5).unwrap();
+
+    let combined_video = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Folder {
+                folder_id: folder.id.clone(),
+            },
+            tag_names: vec!["特選".to_string()],
+            min_rating: Some(4),
+            media_type: MediaFilter::Video,
+            text: "動画".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(combined_video.len(), 1);
+    assert_eq!(combined_video[0].id, mp4_id);
+
+    let combined_manga = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Folder {
+                folder_id: folder.id.clone(),
+            },
+            tag_names: vec!["特選".to_string()],
+            min_rating: Some(5),
+            media_type: MediaFilter::Manga,
+            text: "シリーズ".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(combined_manga.len(), 1);
+    assert_eq!(combined_manga[0].id, group.id);
+
+    // Trash scope + media_type
+    db.move_entries_to_trash(&[
+        EntryRef {
+            kind: EntryKind::Image,
+            id: jpg_id.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Image,
+            id: webm_id.clone(),
+        },
+        EntryRef {
+            kind: EntryKind::Group,
+            id: group.id.clone(),
+        },
+    ])
+    .unwrap();
+
+    let trash_videos = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Trash,
+            media_type: MediaFilter::Video,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(trash_videos.len(), 1);
+    assert_eq!(trash_videos[0].id, webm_id);
+
+    let trash_manga = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Trash,
+            media_type: MediaFilter::Manga,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(trash_manga.len(), 1);
+    assert_eq!(trash_manga[0].id, group.id);
+
+    let trash_images = db
+        .query_entries(&SearchQuery {
+            scope: QueryScope::Trash,
+            media_type: MediaFilter::Image,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(trash_images.len(), 1);
+    assert_eq!(trash_images[0].id, jpg_id);
 }

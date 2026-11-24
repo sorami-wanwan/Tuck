@@ -1374,3 +1374,160 @@ async fn test_lan_server_batch_entry_rating_rbac_and_sync() {
 
     handle.stop("test_done");
 }
+
+#[tokio::test]
+async fn test_lan_query_entries_media_type_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("lan_media_filter.vault");
+    let mut db = VaultDb::create(&vault_path, "vault-pass-media", true).unwrap();
+
+    let png1 = minimal_png_bytes();
+    let mut png2 = minimal_png_bytes();
+    png2.push(1);
+    let mut png3 = minimal_png_bytes();
+    png3.extend_from_slice(&[2, 3]);
+    let mp4 = sample_mp4_bytes();
+
+    let img_id = match db.import_bytes(&png1, Some("standalone_img")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected image"),
+    };
+    let vid_id = match db
+        .import_media_bytes(&mp4, Some("standalone_vid"), None, 2500)
+        .unwrap()
+    {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected video"),
+    };
+    let p1 = match db.import_bytes(&png2, Some("p1")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p1"),
+    };
+    let p2 = match db.import_bytes(&png3, Some("p2")).unwrap() {
+        ImportOutcome::Imported { id, .. } => id,
+        _ => panic!("expected p2"),
+    };
+    let grp = db
+        .create_group_from_items(&[p1, p2], Some("manga_grp"), None)
+        .unwrap();
+
+    let state = AppState::default();
+    {
+        let mut g = state.lock_db().unwrap();
+        *g = Some(db);
+    }
+
+    let dist_dir = dir.path().join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+    fs::write(
+        dist_dir.join("index.html"),
+        "<html><body>Tuck</body></html>",
+    )
+    .unwrap();
+
+    let (handle, status) = start_lan_server_on_addr(
+        state.clone(),
+        StartLanShareRequest {
+            mode: LanAccessMode::ReadOnly,
+            duration_minutes: 30,
+            bind_ip: None,
+            pause_idle_lock: true,
+        },
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "127.0.0.1".to_string(),
+        vec![],
+        AssetSource::Dir(dist_dir),
+        LanHostNotifier::default(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut g = state.lan_server.lock().unwrap();
+        *g = Some(handle.clone());
+    }
+
+    let port = status.port;
+    let pin_body = format!(r#"{{"pin":"{}"}}"#, status.pin);
+    let pin_ok = send_raw_http(
+        port,
+        "POST",
+        "/api/auth/pin",
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Tuck-Client", "web"),
+        ],
+        pin_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(pin_ok.status, 200);
+    let cookie = pin_ok
+        .headers
+        .get("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let run_query = |payload: serde_json::Value| {
+        let cookie_val = cookie.clone();
+        async move {
+            let body = payload.to_string();
+            let res = send_raw_http(
+                port,
+                "POST",
+                "/api/entries/query",
+                &[
+                    ("Cookie", &cookie_val),
+                    ("Content-Type", "application/json"),
+                    ("X-Tuck-Client", "web"),
+                ],
+                body.as_bytes(),
+            )
+            .await;
+            assert_eq!(res.status, 200);
+            serde_json::from_slice::<Vec<serde_json::Value>>(&res.body).unwrap()
+        }
+    };
+
+    // Omitting mediaType defaults to "all" (backwards compatibility)
+    let omitted = run_query(serde_json::json!({ "scope": { "kind": "all" } })).await;
+    assert_eq!(omitted.len(), 3);
+
+    // Explicit "all"
+    let all = run_query(serde_json::json!({
+        "scope": { "kind": "all" },
+        "mediaType": "all"
+    }))
+    .await;
+    assert_eq!(all.len(), 3);
+
+    // "image" -> standalone image only
+    let images = run_query(serde_json::json!({
+        "scope": { "kind": "all" },
+        "mediaType": "image"
+    }))
+    .await;
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["id"], img_id);
+
+    // "video" -> video only
+    let videos = run_query(serde_json::json!({
+        "scope": { "kind": "all" },
+        "mediaType": "video"
+    }))
+    .await;
+    assert_eq!(videos.len(), 1);
+    assert_eq!(videos[0]["id"], vid_id);
+
+    // "manga" -> manga group only
+    let manga = run_query(serde_json::json!({
+        "scope": { "kind": "all" },
+        "mediaType": "manga"
+    }))
+    .await;
+    assert_eq!(manga.len(), 1);
+    assert_eq!(manga[0]["id"], grp.id);
+
+    handle.stop("test_done");
+}

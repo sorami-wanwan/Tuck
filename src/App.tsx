@@ -30,12 +30,14 @@ import { useVaultSession } from "./hooks/useVaultSession";
 import { imageMemoryCache } from "./services/imageCache";
 import { formatErrorMessage, vaultApi } from "./services/vaultApi";
 import { sortImagesOldestFirst } from "./utils/groupOrder";
+import { pruneMimeTypesForMediaFilter } from "./utils/mediaFilter";
 import {
   entryKey,
   type EntryRef,
   type FolderNode,
   type GalleryEntry,
   type LockSettings,
+  type MediaFilter,
   type QueryScope,
   type SearchQuery,
   type SortBy,
@@ -107,9 +109,11 @@ export function App() {
   const [sidebarFilter, setSidebarFilter] = useState("");
   const [searchText, setSearchText] = useState("");
   const [sortBy, setSortBy] = useState<SortBy>("createdDesc");
+  const [mediaType, setMediaType] = useState<MediaFilter>("all");
   const [minRating, setMinRating] = useState<number | null>(null);
   const [mimeTypes, setMimeTypes] = useState<string[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
+  const refreshSeqRef = useRef(0);
 
   const [thumbSize, setThumbSize] = useState(210);
   const [fitMode, setFitMode] = useState<ThumbFitMode>("ratio");
@@ -126,14 +130,34 @@ export function App() {
       scope,
       tagNames: view.kind === "tags" ? view.tags : [],
       minRating,
+      mediaType,
       mimeTypes,
       text: searchText,
       sortBy,
     };
-  }, [view, minRating, mimeTypes, searchText, sortBy]);
+  }, [view, minRating, mediaType, mimeTypes, searchText, sortBy]);
+
+  const handleMediaTypeChange = useCallback((next: MediaFilter) => {
+    setMediaType(next);
+    setMimeTypes((prev) => pruneMimeTypesForMediaFilter(prev, next));
+  }, []);
+
+  const hasActiveFilters =
+    mediaType !== "all" ||
+    minRating !== null ||
+    mimeTypes.length > 0 ||
+    searchText.trim().length > 0;
+
+  const handleResetFilters = useCallback(() => {
+    setMediaType("all");
+    setMinRating(null);
+    setMimeTypes([]);
+    setSearchText("");
+  }, []);
 
   const refreshLibrary = useCallback(async () => {
     if (!status.isOpen) return;
+    const seq = ++refreshSeqRef.current;
     try {
       const [nextStatus, nextFolders, nextTags, nextEntries] = await Promise.all([
         vaultApi.getVaultStatus(),
@@ -141,12 +165,14 @@ export function App() {
         vaultApi.listTags(),
         vaultApi.queryEntries(currentQuery),
       ]);
+      if (seq !== refreshSeqRef.current) return;
       setStatus(nextStatus);
       setFolders(nextFolders);
       setTags(nextTags);
       setEntries(nextEntries);
       syncSelectionRef.current(nextEntries);
     } catch (err) {
+      if (seq !== refreshSeqRef.current) return;
       pushToast("error", formatErrorMessage(err));
     }
   }, [status.isOpen, currentQuery, setStatus, pushToast]);
@@ -293,8 +319,10 @@ export function App() {
       preselectedFolderIds: [],
       preselectedEntries: [],
     });
+    refreshSeqRef.current += 1;
     setSearchText("");
     setSidebarFilter("");
+    setMediaType("all");
     setMinRating(null);
     setMimeTypes([]);
     setHistory([INITIAL_VIEW]);
@@ -716,6 +744,8 @@ export function App() {
             onSortByChange={setSortBy}
             searchText={searchText}
             onSearchTextChange={setSearchText}
+            mediaType={mediaType}
+            onMediaTypeChange={handleMediaTypeChange}
             filterOpen={filterOpen}
             onToggleFilterOpen={() => setFilterOpen((v) => !v)}
             minRating={minRating}
@@ -728,6 +758,7 @@ export function App() {
             }
             onRemoveTag={toggleTagInView}
             onClearAllFilters={() => {
+              setMediaType("all");
               setMinRating(null);
               setMimeTypes([]);
               setSearchText("");
@@ -754,6 +785,8 @@ export function App() {
             fitMode={fitMode}
             isDraggingOsFiles={importFlow.isDraggingOsFiles}
             isTrashView={isTrashView}
+            hasActiveFilters={hasActiveFilters}
+            onResetFilters={handleResetFilters}
             currentFolderId={currentFolderId}
             hoverDropTarget={internalDrag.hoverTarget}
             canEdit={canEdit}

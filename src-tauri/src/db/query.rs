@@ -5,7 +5,7 @@ use rusqlite::{params, params_from_iter, types::Value};
 use crate::crypto::normalize_nfc_trimmed;
 use crate::error::VaultError;
 use crate::models::{
-    natural_cmp, EntryKind, EntryRef, GalleryEntry, QueryScope, SearchQuery, SortBy,
+    natural_cmp, EntryKind, EntryRef, GalleryEntry, MediaFilter, QueryScope, SearchQuery, SortBy,
 };
 
 use super::{escape_like, memo_preview, now_ms, parse_palette, prune_orphan_tags, VaultDb};
@@ -280,16 +280,18 @@ impl VaultDb {
     // ---- Unified Gallery Query ----
 
     pub fn query_entries(&self, query: &SearchQuery) -> Result<Vec<GalleryEntry>, VaultError> {
-        let mut item_tags_map = self.fetch_all_item_tags()?;
-        let mut group_tags_map = self.fetch_all_group_tags()?;
-        let mut item_folders_map = self.fetch_all_item_folders()?;
-        let mut group_folders_map = self.fetch_all_group_folders()?;
-
         let mut results = Vec::new();
         let trimmed_text = normalize_nfc_trimmed(&query.text);
+        let include_standalone = matches!(
+            query.media_type,
+            MediaFilter::All | MediaFilter::Image | MediaFilter::Video
+        );
+        let include_groups = matches!(query.media_type, MediaFilter::All | MediaFilter::Manga);
 
         // 1. Standalone Items
-        {
+        if include_standalone {
+            let mut item_tags_map = self.fetch_all_item_tags()?;
+            let mut item_folders_map = self.fetch_all_item_folders()?;
             let mut sql = String::from(
                 "SELECT i.id, i.title, i.mime_type, i.width, i.height, i.byte_size, i.rating,
                         i.memo, i.palette, i.created_at, i.deleted_at,
@@ -299,6 +301,12 @@ impl VaultDb {
                  WHERE NOT EXISTS (SELECT 1 FROM group_items gi WHERE gi.item_id = i.id)",
             );
             let mut sql_params: Vec<Value> = Vec::new();
+
+            match query.media_type {
+                MediaFilter::Image => sql.push_str(" AND i.mime_type LIKE 'image/%'"),
+                MediaFilter::Video => sql.push_str(" AND i.mime_type LIKE 'video/%'"),
+                MediaFilter::All | MediaFilter::Manga => {}
+            }
 
             match &query.scope {
                 QueryScope::Trash => sql.push_str(" AND i.deleted_at IS NOT NULL"),
@@ -412,7 +420,9 @@ impl VaultDb {
         }
 
         // 2. Manga Groups
-        {
+        if include_groups {
+            let mut group_tags_map = self.fetch_all_group_tags()?;
+            let mut group_folders_map = self.fetch_all_group_folders()?;
             let mut sql = String::from(
                 "SELECT g.id, g.title, g.rating, g.memo, g.created_at, g.deleted_at,
                         ci.id, ci.mime_type, ci.width, ci.height, ci.palette,

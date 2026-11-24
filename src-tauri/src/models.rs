@@ -251,6 +251,16 @@ pub enum QueryScope {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaFilter {
+    #[default]
+    All,
+    Image,
+    Video,
+    Manga,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchQuery {
@@ -260,6 +270,8 @@ pub struct SearchQuery {
     pub tag_names: Vec<String>,
     #[serde(default)]
     pub min_rating: Option<i32>,
+    #[serde(default)]
+    pub media_type: MediaFilter,
     #[serde(default)]
     pub mime_types: Vec<String>,
     #[serde(default)]

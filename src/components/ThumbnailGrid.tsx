@@ -17,6 +17,7 @@ import {
   Maximize2,
   Play,
   RotateCcw,
+  SlidersHorizontal,
   Star,
   Tags,
   Trash2,
@@ -44,6 +45,8 @@ interface ThumbnailGridProps {
   fitMode: ThumbFitMode;
   isDraggingOsFiles: boolean;
   isTrashView: boolean;
+  hasActiveFilters?: boolean;
+  onResetFilters?: () => void;
   currentFolderId: string | null;
   hoverDropTarget: DropTarget;
   canEdit?: boolean;
@@ -280,6 +283,8 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
     fitMode,
     isDraggingOsFiles,
     isTrashView,
+    hasActiveFilters = false,
+    onResetFilters,
     currentFolderId,
     hoverDropTarget,
     canEdit = true,
@@ -463,35 +468,55 @@ export function ThumbnailGrid(props: ThumbnailGridProps) {
         onKeyDown={handleKeyDown}
       >
         {entries.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-card">
-              <ImagePlus size={30} style={{ color: "var(--accent-blue)" }} />
-              <h3>{isTrashView ? "ゴミ箱は空です" : "表示するアイテムがありません"}</h3>
-              {!isTrashView && canEdit && (
-                <>
-                  <p>
-                    {isWebClient
-                      ? "ファイルをドラッグ＆ドロップするか、下のボタンから取り込めます。"
-                      : (
-                        <>
-                          画像やフォルダをドラッグ＆ドロップするか、
-                          <br />
-                          <code>Cmd+V</code> / <code>Ctrl+V</code> でクリップボードから貼り付けられます。
-                        </>
-                      )}
-                  </p>
+          hasActiveFilters ? (
+            <div className="empty-state">
+              <div className="empty-card">
+                <SlidersHorizontal size={28} style={{ color: "var(--accent-blue)" }} />
+                <h3>条件に一致するアイテムがありません</h3>
+                <p>現在の絞り込み条件や検索キーワードを変更してみてください。</p>
+                {onResetFilters && (
                   <button
                     type="button"
                     className="btn btn-primary"
                     style={{ marginBlockStart: 6 }}
-                    onClick={onImportFiles}
+                    onClick={onResetFilters}
                   >
-                    ファイルを選択して取り込む
+                    フィルターを解除
                   </button>
-                </>
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="empty-state">
+              <div className="empty-card">
+                <ImagePlus size={30} style={{ color: "var(--accent-blue)" }} />
+                <h3>{isTrashView ? "ゴミ箱は空です" : "表示するアイテムがありません"}</h3>
+                {!isTrashView && canEdit && (
+                  <>
+                    <p>
+                      {isWebClient
+                        ? "ファイルをドラッグ＆ドロップするか、下のボタンから取り込めます。"
+                        : (
+                          <>
+                            画像やフォルダをドラッグ＆ドロップするか、
+                            <br />
+                            <code>Cmd+V</code> / <code>Ctrl+V</code> でクリップボードから貼り付けられます。
+                          </>
+                        )}
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ marginBlockStart: 6 }}
+                      onClick={onImportFiles}
+                    >
+                      ファイルを選択して取り込む
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )
         ) : (
           <div
             className="grid-virtual-inner"

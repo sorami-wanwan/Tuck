@@ -222,10 +222,13 @@ export type QueryScope =
   | { kind: "trash" }
   | { kind: "folder"; folderId: string };
 
+export type MediaFilter = "all" | "image" | "video" | "manga";
+
 export interface SearchQuery {
   scope: QueryScope;
   tagNames: string[];
   minRating: number | null;
+  mediaType: MediaFilter;
   mimeTypes: string[];
   text: string;
   sortBy: SortBy;
